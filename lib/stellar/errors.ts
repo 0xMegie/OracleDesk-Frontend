@@ -13,7 +13,7 @@ const TABLES: Record<ContractName, Record<number, { message: string }>> = {
 };
 
 /** Plain-language messages for contract error names, from the user's point of view. */
-const FRIENDLY: Record<string, string> = {
+export const FRIENDLY: Record<string, string> = {
   // market-core
   Paused: "Trading is paused right now. Try again later.",
   InvalidAmount: "Enter an amount greater than zero.",
@@ -33,7 +33,7 @@ const FRIENDLY: Record<string, string> = {
   TradeCapExceeded: "This trade is above the treasury's per-trade limit.",
   MarketCapExceeded: "The treasury has reached its limit for this market.",
   DailyCapExceeded: "The treasury has reached its daily limit.",
-  InsufficientBalance: "The treasury doesn't have enough funds for this.",
+  InsufficientBalance: "You don't have enough USDC for this.",
   // resolver
   MarketNotConfigured: "This market's resolution rule hasn't been revealed yet.",
   SpecHashMismatch: "That resolution rule doesn't match what this market committed to.",
@@ -92,6 +92,13 @@ function safeJson(v: unknown): string {
 export function describeError(err: unknown, contract: ContractName = "marketCore"): DescribedError {
   const text = textOf(err);
 
+  if (classifySequenceError(err)) {
+    return {
+      kind: "stale-sequence",
+      code: "txBadSeq",
+      message: "Your account sequence changed while this transaction was being prepared. Please try again.",
+    };
+  }
   if (/user (rejected|declined|denied)|rejected by (the )?user|request (was )?rejected|declined|cancell?ed by user|user closed/i.test(text)) {
     return { kind: "rejected", message: "You cancelled the request in your wallet." };
   }

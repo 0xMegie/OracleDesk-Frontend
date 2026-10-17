@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 
 import { useWallet } from "@/lib/contexts/WalletContext";
@@ -116,6 +116,34 @@ export default function PremiumPage() {
   const [paymentMethod, setPaymentMethod] = useState<"usdc" | "card">("usdc");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [reviewModel, setReviewModel] = useState<{ model: ReviewModel; changedFrom?: ReviewModel } | null>(null);
+  const reviewResolver = useRef<((approved: boolean) => void) | null>(null);
+  const waitingForTransfer =
+    submitQueue.waiting.some((job) => job.label === "USDC transfer") ||
+    (submitQueue.lockWaiting && submitQueue.running?.label === "USDC transfer");
+
+  const reviewPreparedTransfer = useCallback(async (_prepared: unknown, model: ReviewModel, changedFrom?: ReviewModel, forceReview = false) => {
+    if (!forceReview && shouldSkipTxReview()) return true;
+    return new Promise<boolean>((resolve) => {
+      reviewResolver.current = resolve;
+      setReviewModel({ model, changedFrom });
+    });
+  }, []);
+  const closeReview = useCallback((approved: boolean) => {
+    setReviewModel(null);
+    const resolve = reviewResolver.current;
+    reviewResolver.current = null;
+    resolve?.(approved);
+  }, []);
+
+  useEffect(
+    () => () => {
+      const resolve = reviewResolver.current;
+      reviewResolver.current = null;
+      resolve?.(false);
+    },
+    [],
+  );
 
   const prepareTransfer = usePrepareUsdcTransfer({
     to: PAYMENTS_RECIPIENT,
@@ -471,7 +499,7 @@ export default function PremiumPage() {
                   {/* Final or error status */}
                   {!transfer.isPending && statusMessage && (
                     <div className="p-3 bg-primary-container/10 border border-primary/20 rounded text-primary text-xs font-bold break-all" role="status">
-                      {statusMessage}
+                      {waitingForTransfer ? "Waiting for your previous transaction to finish…" : statusMessage}
                     </div>
                   )}
 
@@ -496,12 +524,23 @@ export default function PremiumPage() {
                   <p className="text-center text-[10px] text-on-surface-variant uppercase tracking-widest mt-4">
                     Verified on-chain by OracleDesk before access is granted
                   </p>
+                  <div className="text-center">
+                    <TxReviewPreferenceControl />
+                  </div>
                 </div>
               </div>
             </motion.div>
           </div>
         )}
       </AnimatePresence>
+      {reviewModel && (
+        <TxReview
+          model={reviewModel.model}
+          changedFrom={reviewModel.changedFrom}
+          onConfirm={() => closeReview(true)}
+          onCancel={() => closeReview(false)}
+        />
+      )}
     </main>
   );
 }

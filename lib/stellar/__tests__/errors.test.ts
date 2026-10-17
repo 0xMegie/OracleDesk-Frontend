@@ -23,6 +23,19 @@ describe("describeError", () => {
     expect(describeError(new Error("User declined access")).kind).toBe("rejected");
   });
 
+  it("classifies txBadSeq from structured RPC results and SDK error text", () => {
+    const structured = {
+      sendTransactionResponse: {
+        errorResult: {
+          result: () => ({ switch: () => ({ name: "txBadSeq" }) }),
+        },
+      },
+    };
+    expect(classifySequenceError(structured)).toBe(true);
+    expect(describeError(structured)).toMatchObject({ kind: "stale-sequence", code: "txBadSeq" });
+    expect(describeError("Transaction failed: txBadSeq")).toMatchObject({ kind: "stale-sequence" });
+  });
+
   it("recognises balance and trustline failures before contract codes", () => {
     // A SAC failure inside market_core.buy carries the token's own code.
     expect(describeError("Error(Contract, #10) ... balance is not sufficient to spend").kind).toBe("insufficient-balance");

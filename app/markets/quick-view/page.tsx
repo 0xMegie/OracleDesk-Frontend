@@ -1,6 +1,6 @@
 "use client";
 
-import React, { Suspense, useEffect, useState } from "react";
+import React, { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -92,11 +92,19 @@ function MarketQuickViewContent() {
   const balance = useUsdcBalance(address);
   const reserve = useAccountReserve(address);
   const buy = useBuy();
+  const submitQueue = useSubmitQueueState(address);
+  const [now, setNow] = useState<number | null>(null);
 
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(interval);
+  }, []);
   const [showModal] = useState(true);
   const [side, setSide] = useState<"Yes" | "No">(initialSide);
   const [amountInput, setAmountInput] = useState("10");
   const [buyStatus, setBuyStatus] = useState<string | null>(null);
+  const [reviewModel, setReviewModel] = useState<{ model: ReviewModel; changedFrom?: ReviewModel } | null>(null);
+  const reviewResolver = useRef<((approved: boolean) => void) | null>(null);
   const amountRaw = tryParseUsdc(amountInput);
   const debouncedAmount = useDebounced(amountRaw, 400);
   const quote = useQuoteBuy(onChainMarketId, side, debouncedAmount);
@@ -116,8 +124,33 @@ function MarketQuickViewContent() {
   const yesProb = view ? Math.round(view.yesBps / 100) : backendProb;
   const noProb = 100 - yesProb;
   const chainStatus = view?.market.status;
-  // Compare with when the market was read, not "now", to keep render pure.
+  // Use a timer-backed timestamp so freshness changes are reflected without impure render reads.
   const isOpen = chainStatus?.tag === "Open" && Number(view?.market.close_time ?? 0) * 1000 > chain.dataUpdatedAt;
+  const isFresh = (updatedAt: number, maxAge: number) =>
+    now !== null && now >= updatedAt && now - updatedAt <= maxAge;
+  const tradePreflight = preflightBuy(
+    {
+      config:
+        config.data && isFresh(config.dataUpdatedAt, 60_000)
+          ? { paused: config.data.paused }
+          : undefined,
+      market: view?.market,
+      marketIsStale: Boolean(view && now !== null && !isFresh(chain.dataUpdatedAt, 15_000)),
+      ledgerNow:
+        ledgerNow.data !== undefined && isFresh(ledgerNow.dataUpdatedAt, 5_000)
+          ? ledgerNow.data
+          : undefined,
+      position: position.data && isFresh(position.dataUpdatedAt, 15_000) ? position.data : undefined,
+      positionIsStale: Boolean(position.data && now !== null && !isFresh(position.dataUpdatedAt, 15_000)),
+      usdcBalance:
+        balance.data !== undefined && isFresh(balance.dataUpdatedAt, 15_000)
+          ? balance.data
+          : undefined,
+    },
+    side,
+    amountRaw ?? 0n,
+  );
+  const buyPreflightFailure = tradePreflight.ok === false ? tradePreflight.failures[0] : null;
 
   const isLoading = backendById.isLoading || (backendByChainId.isLoading && !marketId) || (chain.isLoading && !market);
   const notFound = !market && !view;
@@ -455,6 +488,14 @@ function MarketQuickViewContent() {
           </div>
         )}
       </AnimatePresence>
+      {reviewModel && (
+        <TxReview
+          model={reviewModel.model}
+          changedFrom={reviewModel.changedFrom}
+          onConfirm={() => closeReview(true)}
+          onCancel={() => closeReview(false)}
+        />
+      )}
     </main>
   );
 }
