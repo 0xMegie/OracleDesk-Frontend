@@ -1,4 +1,4 @@
-import { Address, nativeToScVal, scValToNative, rpc } from "@stellar/stellar-sdk";
+import { Address, nativeToScVal, rpc, scValToNative } from "@stellar/stellar-sdk";
 import { AssembledTransaction } from "@stellar/stellar-sdk/contract";
 import type { ClientOptions, SignTransaction } from "@stellar/stellar-sdk/contract";
 import { Client as MarketCoreClient, type Category, type Outcome } from "./generated/market-core";
@@ -13,7 +13,16 @@ export interface Signer {
   signTransaction: SignTransaction;
 }
 
-export const rpcServer = new rpc.Server(RPC_URL, { allowHttp: RPC_URL.startsWith("http://") });
+let _rpcServer: rpc.Server | null = null;
+/** Memoised Stellar RPC server instance. */
+export function rpcServer(): rpc.Server {
+  if (!_rpcServer) {
+    _rpcServer = new rpc.Server(RPC_URL, {
+      allowHttp: RPC_URL.startsWith("http://"),
+    });
+  }
+  return _rpcServer;
+}
 
 function options(contractId: string, signer?: Signer): ClientOptions {
   return {
