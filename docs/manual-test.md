@@ -6,7 +6,7 @@ These steps cover what automated checks can't: a real browser wallet signing rea
 
 ## Before you start: two known blockers
 
-1. **Test USDC can only be minted by the deployer key.** The collateral is a self-issued test asset (`USDC` issued by `GD2NB2VUME7ECMHFHQN5M3KUZLLJF3R6Z4OFCBLE4SJNHIQHITRPQGHQ`, wrapped as the SAC `CA2WQQJ4OHQCLHQW6XN4BCLILGRV6V4YDYDT3GVIWXB53BTOO7EMREQH`). There is no faucet, so step 4 needs a maintainer (see [contract-requests.md](contract-requests.md) #3).
+1. **Test USDC can only be minted by the deployer key.** The collateral is a self-issued test asset wrapped as a Stellar Asset Contract. There is no faucet, so step 4 still needs a maintainer (see [contract-requests.md](contract-requests.md) #3).
 2. **Both existing testnet markets are closed.** Markets 0 and 1 were created by the contracts repo's demo with a 90-second trading window on 2026-09-21; market 0 is resolved YES. Buying on them fails with "This market has closed". Step 7 therefore needs a fresh, open market (see below).
 
 ## You need
@@ -31,9 +31,11 @@ These steps cover what automated checks can't: a real browser wallet signing rea
 
 ## 4. Get test USDC
 
-a. **Add the trustline** (the account must trust the asset before it can hold it):
+a. **Enable the trustline in OracleDesk** (the account must trust the asset before it can hold it):
 
-- [ ] Freighter → Manage assets → Add manually: code `USDC`, issuer `GD2NB2VUME7ECMHFHQN5M3KUZLLJF3R6Z4OFCBLE4SJNHIQHITRPQGHQ`. Approve the transaction.
+- [ ] Connect your funded wallet, then open the wallet menu or an on-chain market's quick view.
+- [ ] Click **Enable USDC** and approve the one-time `changeTrust` transaction. The flow checks spendable XLM for the trustline reserve and transaction fee first.
+- [ ] Wait for the trustline to appear. Enabling it does not submit a pending buy; review the amount and click **Buy** again.
 
 b. **Ask a maintainer to mint.** With the deployer key from `scripts/deploy-testnet.sh` (the CLI identity `oracledesk-deployer`), they run:
 

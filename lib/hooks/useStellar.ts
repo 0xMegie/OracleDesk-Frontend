@@ -41,6 +41,7 @@ export const stellarKeys = {
   balance: (owner: string) => ["stellar", "usdcBalance", owner] as const,
   account: (addr: string) => ["stellar", "account", addr] as const,
   quoteBuy: (id: string, outcome: OutcomeTag, amount: string) => ["stellar", "quoteBuy", id, outcome, amount] as const,
+  exactBuy: (id: string, outcome: OutcomeTag, target: string) => ["stellar", "exactBuy", id, outcome, target] as const,
   trace: (id: string) => ["stellar", "trace", id] as const,
 };
 
@@ -474,7 +475,6 @@ function useTxRunner(contract: ContractName) {
 export interface BuyParams {
   marketId: bigint | string;
   outcome: OutcomeTag;
-  collateralIn: bigint;
   slippageBps: number;
   confirmBoundsChanged?: (previous: bigint, next: bigint) => Promise<boolean>;
   review?: PreparedWriteReview;
@@ -725,7 +725,7 @@ export function useBuy() {
       prepared,
     }: BuyParams & { prepared?: PreparedBuy }) => {
       const signer = guard();
-      if (collateralIn <= 0n) throw new UserFacingError({ kind: "contract", message: "Enter an amount greater than zero." });
+      await requireUsdcTrustline(signer.publicKey);
       const id = toId(marketId);
 
       let tx: AssembledTransaction<unknown>;
@@ -779,11 +779,9 @@ export function useBuy() {
   };
 }
 
-export interface SellParams {
+export type SellParams = {
   marketId: bigint | string;
   outcome: OutcomeTag;
-  /** Exact number of shares to sell. */
-  shares: bigint;
   slippageBps: number;
   review?: PreparedWriteReview;
 }
@@ -797,21 +795,120 @@ export function useSell() {
   const mutation = useMutation({
     mutationFn: async ({ marketId, outcome, shares, slippageBps }: SellParams) => {
       const signer = guard();
+      await requireUsdcTrustline(signer.publicKey);
       const id = toId(marketId);
-      const { market } = await fetchOnChainMarket(id);
+      let { market } = await fetchOnChainMarket(id);
+      const position = simulated<Position>(
+        await marketCore().get_position({ market_id: id, holder: signer.publicKey }),
+      );
+      const heldShares = outcome === "Yes" ? position.yes : position.no;
+      const shares = params.mode === "all" ? heldShares : params.shares;
+      if (shares <= 0n) {
+        throw new UserFacingError({ kind: "contract", code: "InvalidAmount", message: "Enter a share amount greater than zero." });
+      }
+      if (shares > heldShares) {
+        throw new UserFacingError({ kind: "contract", code: "InsufficientShares", message: "You don't have enough shares for this sale." });
+      }
       const [rSold, rOther] = outcome === "Yes" ? [market.reserve_yes, market.reserve_no] : [market.reserve_no, market.reserve_yes];
-      let collateralOut: bigint;
-      try {
-        collateralOut = collateralOutForShares(rSold, rOther, shares, BigInt(market.fee_bps));
-      } catch {
-        throw new UserFacingError({ kind: "contract", message: "There isn't enough liquidity to sell that many shares." });
+      const feeBps = BigInt(market.fee_bps);
+      let local = solveSellForShares(rSold, rOther, shares, feeBps);
+      if ("error" in local) {
+        throw new UserFacingError({
+          kind: "contract",
+          code: local.error === "too-small" ? "InvalidAmount" : "InsufficientLiquidity",
+          message: local.error === "too-small"
+            ? "That's too few shares to sell after fees."
+            : "There isn't enough liquidity to sell that many shares.",
+        });
+      }
+
+      const quoteAt = async (collateralOut: bigint) =>
+        simulated<bigint>(
+          await marketCore().quote_sell({ market_id: id, outcome: Outcomes[outcome], collateral_out: collateralOut }),
+        );
+      let confirmed = await reconcileWithQuote(local, quoteAt);
+      if (confirmed.sharesIn !== local.sharesIn) {
+        market = (await fetchOnChainMarket(id)).market;
+        const [freshSold, freshOther] =
+          outcome === "Yes" ? [market.reserve_yes, market.reserve_no] : [market.reserve_no, market.reserve_yes];
+        const refreshed = solveSellForShares(freshSold, freshOther, shares, BigInt(market.fee_bps));
+        if ("error" in refreshed) {
+          throw new UserFacingError({
+            kind: "contract",
+            code: refreshed.error === "too-small" ? "InvalidAmount" : "InsufficientLiquidity",
+            message: refreshed.error === "too-small"
+              ? "That's too few shares to sell after fees."
+              : "There isn't enough liquidity to sell that many shares.",
+          });
+        }
+        local = refreshed;
+        confirmed = await reconcileWithQuote(local, quoteAt);
+        if (confirmed.sharesIn !== local.sharesIn) {
+          const maxOut = ((freshOther - 1n) * (BPS - BigInt(market.fee_bps))) / BPS;
+          let low = 0n;
+          let high = maxOut + 1n;
+          let lowQuote = 0n;
+          let probes = 0;
+          let pivot = confirmed.collateralOut;
+          let pivotQuote = confirmed.sharesIn;
+          if (pivotQuote <= shares) {
+            low = pivot;
+            lowQuote = pivotQuote;
+          } else {
+            high = pivot;
+          }
+
+          let step = 1n;
+          while ((low === 0n || high === maxOut + 1n) && probes < 4) {
+            probes++;
+            if (low === 0n) {
+              pivot = high > maxOut ? maxOut : high;
+              const candidate = pivot > step ? pivot - step : 1n;
+              pivotQuote = await quoteAt(candidate);
+              if (pivotQuote <= shares) {
+                low = candidate;
+                lowQuote = pivotQuote;
+              } else high = candidate;
+            } else {
+              const candidate = low + step;
+              if (candidate > maxOut) break;
+              pivotQuote = await quoteAt(candidate);
+              if (pivotQuote > shares) high = candidate;
+              else {
+                low = candidate;
+                lowQuote = pivotQuote;
+              }
+            }
+            step *= 2n;
+          }
+          while (high - low > 1n && probes < 8) {
+            probes++;
+            const mid = (low + high) / 2n;
+            const midQuote = await quoteAt(mid);
+            if (midQuote <= shares) {
+              low = mid;
+              lowQuote = midQuote;
+            } else high = mid;
+          }
+          if (low === 0n || high - low > 1n) {
+            throw new UserFacingError({
+              kind: "network",
+              message: "The market changed while preparing your sale. Refresh the quote and try again.",
+            });
+          }
+          confirmed = { collateralOut: low, sharesIn: lowQuote, dust: shares - lowQuote, iterations: probes };
+        }
+      }
+
+      if (confirmed.sharesIn > shares) {
+        throw new UserFacingError({ kind: "contract", code: "InsufficientShares", message: "You don't have enough shares for this sale." });
       }
       const maxSharesIn = maxIn(shares, slippageBps) + 1n;
       const tx = await marketCore(signer).sell({
         trader: signer.publicKey,
         market_id: id,
         outcome: Outcomes[outcome],
-        collateral_out: collateralOut,
+        collateral_out: confirmed.collateralOut,
         max_shares_in: maxSharesIn,
       });
 

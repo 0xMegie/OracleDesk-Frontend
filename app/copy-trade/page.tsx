@@ -57,6 +57,7 @@ function CopyTradeContent() {
   const [traceError, setTraceError] = useState<string | null>(null);
   const { data: market } = useMarket(marketIdParam ?? trace?.marketId ?? undefined);
   const onChainMarketId = market?.onChainMarketId ?? null;
+  const onChainMarket = useOnChainMarket(onChainMarketId);
 
   const balance = useUsdcBalance(address);
   const reserve = useAccountReserve(address);
@@ -184,6 +185,24 @@ function CopyTradeContent() {
       setStatusMessage("This market isn't on-chain yet, so it can't be traded.");
       return;
     }
+    if (!onChainMarket.data) {
+      setStatusMessage("Checking the on-chain market and ledger time…");
+      return;
+    }
+    if (!marketCanTrade) {
+      setStatusMessage("This market is closed or too close to its deadline to safely place a trade.");
+      return;
+    }
+    if (!trustlineReady) {
+      setStatusMessage(
+        trustlineMissing
+          ? "Enable your USDC trustline before copying this trade."
+          : trustline.data?.kind === "present"
+            ? "The issuer hasn't authorized your USDC trustline."
+            : "Checking your USDC trustline…",
+      );
+      return;
+    }
     if (!amountRaw || amountRaw <= 0n) {
       setStatusMessage("Choose an allocation greater than zero. You may need USDC in your wallet first.");
       return;
@@ -194,6 +213,17 @@ function CopyTradeContent() {
       setStatusMessage("Signing in to OracleDesk…");
       if (!(await ensureSession())) {
         setStatusMessage("You need to sign in with your wallet to copy trades.");
+        return;
+      }
+
+      const freshMarket = await fetchOnChainMarket(onChainMarketId);
+      const freshLedgerNow = getLedgerNow();
+      if (
+        freshLedgerNow === null ||
+        freshMarket.market.status.tag !== "Open" ||
+        BigInt(Math.floor(freshLedgerNow)) + BigInt(SAFETY_MARGIN_S + MIN_TX_TIMEOUT_S) >= freshMarket.market.close_time
+      ) {
+        setStatusMessage("This market is closed or too close to its deadline to safely place a trade.");
         return;
       }
 
@@ -227,6 +257,16 @@ function CopyTradeContent() {
       }
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleEnableUsdc = async () => {
+    setStatusMessage("Checking XLM reserve, then opening your wallet…");
+    try {
+      await enableUsdc.mutateAsync();
+      setStatusMessage("USDC is enabled. Click Confirm Copy Trade when you're ready.");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Couldn't enable USDC.");
     }
   };
 

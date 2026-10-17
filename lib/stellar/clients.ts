@@ -45,6 +45,14 @@ export const reasoningRegistry = (signer?: Signer) =>
  * bindings; calls are built directly with AssembledTransaction.
  */
 export const token = {
+  name(contractId: string = CONTRACTS.usdc): Promise<AssembledTransaction<string>> {
+    return AssembledTransaction.build<string>({
+      ...options(contractId),
+      method: "name",
+      args: [],
+      parseResultXdr: (v) => String(scValToNative(v)),
+    });
+  },
   balance(owner: string, contractId: string = CONTRACTS.usdc): Promise<AssembledTransaction<bigint>> {
     return AssembledTransaction.build<bigint>({
       ...options(contractId),
@@ -57,9 +65,11 @@ export const token = {
     params: { from: string; to: string; amount: bigint },
     signer: Signer,
     contractId: string = CONTRACTS.usdc,
+    txOptions: { timeoutInSeconds?: number } = {},
   ): Promise<AssembledTransaction<null>> {
     return AssembledTransaction.build<null>({
       ...options(contractId, signer),
+      ...txOptions,
       method: "transfer",
       args: [
         new Address(params.from).toScVal(),
