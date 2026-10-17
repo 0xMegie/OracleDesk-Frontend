@@ -1,6 +1,6 @@
 "use client";
 
-import React, { Suspense, useEffect, useState } from "react";
+import React, { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -8,10 +8,14 @@ import { useQuery } from "@tanstack/react-query";
 import { useMarket } from "@/lib/hooks/useMarkets";
 import { getMarketByOnChainId } from "@/lib/api/markets";
 import { ApiError } from "@/lib/api/client";
-import { useBuy, useOnChainMarket, usePosition, useQuoteBuy, useUsdcBalance } from "@/lib/hooks/useStellar";
+import { useBuy, useLedgerNow, useMarketConfig, useOnChainMarket, usePosition, useQuoteBuy, useUsdcBalance } from "@/lib/hooks/useStellar";
 import { useWallet } from "@/lib/contexts/WalletContext";
 import { explorerTx } from "@/lib/stellar/config";
 import { formatUsdc, minOut, tryParseUsdc } from "@/lib/stellar/units";
+import { preflightBuy } from "@/lib/stellar/preflight";
+import { useSubmitQueueState } from "@/lib/stellar/submit-queue";
+import { shouldSkipTxReview, TxReview, TxReviewPreferenceControl } from "@/components/tx-review";
+import type { ReviewModel } from "@/lib/stellar/tx-decode";
 
 const SLIPPAGE_BPS = 100; // 1%
 
@@ -68,15 +72,51 @@ function MarketQuickViewContent() {
   const { address, isConnected, openModal } = useWallet();
   const position = usePosition(onChainMarketId, address);
   const balance = useUsdcBalance(address);
+  const config = useMarketConfig();
+  const ledgerNow = useLedgerNow();
   const buy = useBuy();
+  const submitQueue = useSubmitQueueState(address);
+  const [now, setNow] = useState<number | null>(null);
 
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(interval);
+  }, []);
   const [showModal] = useState(true);
   const [side, setSide] = useState<"Yes" | "No">(initialSide);
   const [amountInput, setAmountInput] = useState("10");
   const [buyStatus, setBuyStatus] = useState<string | null>(null);
+  const [reviewModel, setReviewModel] = useState<{ model: ReviewModel; changedFrom?: ReviewModel } | null>(null);
+  const reviewResolver = useRef<((approved: boolean) => void) | null>(null);
   const amountRaw = tryParseUsdc(amountInput);
   const debouncedAmount = useDebounced(amountRaw, 400);
   const quote = useQuoteBuy(onChainMarketId, side, debouncedAmount);
+  const buyLabel = `Buy ${side} on #${onChainMarketId}`;
+  const waitingForBuy =
+    submitQueue.waiting.some((job) => job.label === buyLabel) ||
+    (submitQueue.lockWaiting && submitQueue.running?.label === buyLabel);
+  const reviewPreparedBuy = useCallback(async (_prepared: unknown, model: ReviewModel, changedFrom?: ReviewModel, forceReview = false) => {
+    if (!forceReview && shouldSkipTxReview()) return true;
+    return new Promise<boolean>((resolve) => {
+      reviewResolver.current = resolve;
+      setReviewModel({ model, changedFrom });
+    });
+  }, []);
+  const closeReview = useCallback((approved: boolean) => {
+    setReviewModel(null);
+    const resolve = reviewResolver.current;
+    reviewResolver.current = null;
+    resolve?.(approved);
+  }, []);
+
+  useEffect(
+    () => () => {
+      const resolve = reviewResolver.current;
+      reviewResolver.current = null;
+      resolve?.(false);
+    },
+    [],
+  );
 
   // Illustrative only: there is no price history source yet.
   const sparklinePath = "M0 25 L10 22 L20 28 L30 18 L40 20 L50 15 L60 17 L70 10 L80 12 L90 5 L100 8";
@@ -87,8 +127,33 @@ function MarketQuickViewContent() {
   const yesProb = view ? Math.round(view.yesBps / 100) : backendProb;
   const noProb = 100 - yesProb;
   const chainStatus = view?.market.status;
-  // Compare with when the market was read, not "now", to keep render pure.
+  // Use a timer-backed timestamp so freshness changes are reflected without impure render reads.
   const isOpen = chainStatus?.tag === "Open" && Number(view?.market.close_time ?? 0) * 1000 > chain.dataUpdatedAt;
+  const isFresh = (updatedAt: number, maxAge: number) =>
+    now !== null && now >= updatedAt && now - updatedAt <= maxAge;
+  const tradePreflight = preflightBuy(
+    {
+      config:
+        config.data && isFresh(config.dataUpdatedAt, 60_000)
+          ? { paused: config.data.paused }
+          : undefined,
+      market: view?.market,
+      marketIsStale: Boolean(view && now !== null && !isFresh(chain.dataUpdatedAt, 15_000)),
+      ledgerNow:
+        ledgerNow.data !== undefined && isFresh(ledgerNow.dataUpdatedAt, 5_000)
+          ? ledgerNow.data
+          : undefined,
+      position: position.data && isFresh(position.dataUpdatedAt, 15_000) ? position.data : undefined,
+      positionIsStale: Boolean(position.data && now !== null && !isFresh(position.dataUpdatedAt, 15_000)),
+      usdcBalance:
+        balance.data !== undefined && isFresh(balance.dataUpdatedAt, 15_000)
+          ? balance.data
+          : undefined,
+    },
+    side,
+    amountRaw ?? 0n,
+  );
+  const buyPreflightFailure = tradePreflight.ok === false ? tradePreflight.failures[0] : null;
 
   const isLoading = backendById.isLoading || (backendByChainId.isLoading && !marketId) || (chain.isLoading && !market);
   const notFound = !market && !view;
@@ -103,9 +168,15 @@ function MarketQuickViewContent() {
       setBuyStatus("Enter an amount like 10 or 2.5.");
       return;
     }
-    setBuyStatus("Getting a fresh quote, then asking your wallet to sign…");
+    setBuyStatus(waitingForBuy ? "Waiting for your previous transaction to finish…" : "Getting a fresh quote and preparing your transaction…");
     try {
-      const result = await buy.mutateAsync({ marketId: onChainMarketId, outcome: side, collateralIn: amountRaw, slippageBps: SLIPPAGE_BPS });
+      const result = await buy.mutateAsync({
+        marketId: onChainMarketId,
+        outcome: side,
+        collateralIn: amountRaw,
+        slippageBps: SLIPPAGE_BPS,
+        review: reviewPreparedBuy,
+      });
       setBuyStatus(
         `Bought ${formatUsdc(result.sharesOut, { maxDecimals: 2 })} ${side.toUpperCase()} shares.` +
           (result.txHash ? ` View: ${explorerTx(result.txHash)}` : ""),
@@ -281,10 +352,10 @@ function MarketQuickViewContent() {
                       <button
                         type="button"
                         onClick={handleBuy}
-                        disabled={buy.isPending || (isConnected && !isOpen)}
+                        disabled={buy.isPending || (isConnected && buyPreflightFailure !== null)}
                         className="bg-primary text-primary-foreground px-4 py-2 rounded-lg font-label-caps text-label-caps font-bold disabled:opacity-50"
                       >
-                        {!isConnected ? "Connect" : buy.isPending ? "Buying…" : `Buy ${side.toUpperCase()}`}
+                        {!isConnected ? "Connect" : waitingForBuy ? "Waiting…" : buy.isPending ? "Preparing…" : `Buy ${side.toUpperCase()}`}
                       </button>
                     </div>
                     <div className="flex justify-between text-[11px] font-data-mono text-on-surface-variant">
@@ -297,8 +368,13 @@ function MarketQuickViewContent() {
                       </span>
                       {balance.data !== undefined && <span>Balance {formatUsdc(balance.data, { maxDecimals: 2, grouping: true })}</span>}
                     </div>
-                    {!isOpen && view && (
-                      <p className="text-[11px] text-on-surface-variant">This market is closed to trading.</p>
+                    {buyPreflightFailure && isConnected && (
+                      <p className="text-[11px] text-error" role="alert">{buyPreflightFailure.message}</p>
+                    )}
+                    {waitingForBuy && (
+                      <p className="text-[11px] text-on-surface-variant" role="status">
+                        Waiting for your previous transaction to finish…
+                      </p>
                     )}
                     {position.data && (position.data.yes > 0n || position.data.no > 0n) && (
                       <p className="text-[11px] font-data-mono text-on-surface">
@@ -307,6 +383,7 @@ function MarketQuickViewContent() {
                       </p>
                     )}
                     {buyStatus && <p className="text-xs text-on-surface-variant break-all" role="status">{buyStatus}</p>}
+                    <TxReviewPreferenceControl />
                   </div>
                 )}
 
@@ -347,6 +424,14 @@ function MarketQuickViewContent() {
           </div>
         )}
       </AnimatePresence>
+      {reviewModel && (
+        <TxReview
+          model={reviewModel.model}
+          changedFrom={reviewModel.changedFrom}
+          onConfirm={() => closeReview(true)}
+          onCancel={() => closeReview(false)}
+        />
+      )}
     </main>
   );
 }

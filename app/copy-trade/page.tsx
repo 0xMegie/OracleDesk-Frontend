@@ -1,15 +1,18 @@
 "use client";
 
-import React, { useState, useRef, useEffect, Suspense } from "react";
+import React, { useState, useRef, useEffect, useCallback, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useWallet } from "@/lib/contexts/WalletContext";
 import { getTrace, ReasoningTrace } from "@/lib/api/traces";
 import { confirmCopyTrade, initiateCopyTrade } from "@/lib/api/trade";
 import { ApiError } from "@/lib/api/client";
 import { useMarket } from "@/lib/hooks/useMarkets";
-import { useBuy, useQuoteBuy, useUsdcBalance } from "@/lib/hooks/useStellar";
+import { useBuy, useQuoteBuy, useUsdcBalance, type PreparedWriteReview } from "@/lib/hooks/useStellar";
 import { explorerTx } from "@/lib/stellar/config";
 import { formatUsdc, minOut, shareOf } from "@/lib/stellar/units";
+import { useSubmitQueueState } from "@/lib/stellar/submit-queue";
+import { shouldSkipTxReview, TxReview, TxReviewPreferenceControl } from "@/components/tx-review";
+import type { ReviewModel } from "@/lib/stellar/tx-decode";
 
 /** Wait this long after the slider stops before asking for a new quote. */
 const QUOTE_DEBOUNCE_MS = 400;
@@ -38,13 +41,38 @@ function CopyTradeContent() {
 
   const balance = useUsdcBalance(address);
   const buy = useBuy();
+  const submitQueue = useSubmitQueueState(address);
 
   // Allocation as a share of the wallet's USDC balance, in basis points.
   const [allocationBps, setAllocationBps] = useState(1250);
   const [slippage, setSlippage] = useState(1.0);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [reviewModel, setReviewModel] = useState<{ model: ReviewModel; changedFrom?: ReviewModel } | null>(null);
+  const reviewResolver = useRef<((approved: boolean) => void) | null>(null);
   const sliderRef = useRef<HTMLDivElement>(null);
+  const reviewPreparedBuy = useCallback<PreparedWriteReview>(async (_prepared, model, changedFrom, forceReview = false) => {
+    if (!forceReview && shouldSkipTxReview()) return true;
+    return new Promise<boolean>((resolve) => {
+      reviewResolver.current = resolve;
+      setReviewModel({ model, changedFrom });
+    });
+  }, []);
+  const closeReview = useCallback((approved: boolean) => {
+    setReviewModel(null);
+    const resolve = reviewResolver.current;
+    reviewResolver.current = null;
+    resolve?.(approved);
+  }, []);
+
+  useEffect(
+    () => () => {
+      const resolve = reviewResolver.current;
+      reviewResolver.current = null;
+      resolve?.(false);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!traceId) return;
@@ -55,6 +83,10 @@ function CopyTradeContent() {
 
   // Side comes from the trace's edge. No trace or zero edge means no trade.
   const side: "Yes" | "No" | null = trace && trace.edge !== 0 ? (trace.edge > 0 ? "Yes" : "No") : null;
+  const buyLabel = side && onChainMarketId ? `Buy ${side} on #${onChainMarketId}` : "";
+  const waitingForBuy =
+    submitQueue.waiting.some((job) => job.label === buyLabel) ||
+    (submitQueue.lockWaiting && submitQueue.running?.label === buyLabel);
   const allocation = allocationBps / 100;
   const amountRaw = balance.data !== undefined ? shareOf(balance.data, allocationBps) : null;
   const slippageBps = Math.round(slippage * 100);
@@ -134,12 +166,17 @@ function CopyTradeContent() {
         amountRaw: amountRaw.toString(),
       });
 
-      setStatusMessage("Getting a fresh quote, then asking your wallet to sign…");
+      setStatusMessage(waitingForBuy ? "Waiting for your previous transaction to finish…" : "Getting a fresh quote, then asking your wallet to sign…");
       const result = await buy.mutateAsync({
         marketId: onChainMarketId,
         outcome: side,
         collateralIn: amountRaw,
         slippageBps,
+        review: reviewPreparedBuy,
+        confirmBoundsChanged: async (previous, next) =>
+          window.confirm(
+            `The quote changed during retry. The minimum shares decreased from ${formatUsdc(previous, { maxDecimals: 2 })} to ${formatUsdc(next, { maxDecimals: 2 })}. Continue?`,
+          ),
       });
 
       if (result.txHash) await confirmCopyTrade(copyTradeId, result.txHash).catch(() => undefined);
@@ -327,7 +364,7 @@ function CopyTradeContent() {
             <div className="space-y-3">
               {statusMessage ? (
                 <div className="rounded-2xl border border-outline-variant bg-surface p-4 text-sm text-on-surface-variant">
-                  {statusMessage}
+                  {waitingForBuy ? "Waiting for your previous transaction to finish…" : statusMessage}
                 </div>
               ) : null}
               <div className="flex gap-3">
@@ -345,16 +382,27 @@ function CopyTradeContent() {
                   disabled={isSubmitting || !side}
                 >
                   <span className="material-symbols-outlined text-xl">bolt</span>
-                  {isSubmitting ? "Submitting..." : "Confirm Copy Trade"}
+                  {waitingForBuy ? "Waiting…" : isSubmitting ? "Submitting..." : "Confirm Copy Trade"}
                 </button>
               </div>
               <p className="text-center font-body-md text-body-md text-on-surface-variant text-xs">
                 Your wallet signs a buy on the OracleDesk market contract on Stellar Testnet. The trade fails instead of filling below the slippage limit.
               </p>
+              <div className="text-center">
+                <TxReviewPreferenceControl />
+              </div>
             </div>
           </div>
         </div>
       </main>
+      {reviewModel && (
+        <TxReview
+          model={reviewModel.model}
+          changedFrom={reviewModel.changedFrom}
+          onConfirm={() => closeReview(true)}
+          onCancel={() => closeReview(false)}
+        />
+      )}
     </div>
   );
 }

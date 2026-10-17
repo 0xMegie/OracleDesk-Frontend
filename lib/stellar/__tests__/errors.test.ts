@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeError } from "../errors";
+import { classifySequenceError, describeError } from "../errors";
 
 describe("describeError", () => {
   it("maps market-core contract errors by code", () => {
@@ -20,6 +20,19 @@ describe("describeError", () => {
   it("recognises wallet rejection", () => {
     expect(describeError({ code: -4, message: "The user rejected this request." }).kind).toBe("rejected");
     expect(describeError(new Error("User declined access")).kind).toBe("rejected");
+  });
+
+  it("classifies txBadSeq from structured RPC results and SDK error text", () => {
+    const structured = {
+      sendTransactionResponse: {
+        errorResult: {
+          result: () => ({ switch: () => ({ name: "txBadSeq" }) }),
+        },
+      },
+    };
+    expect(classifySequenceError(structured)).toBe(true);
+    expect(describeError(structured)).toMatchObject({ kind: "stale-sequence", code: "txBadSeq" });
+    expect(describeError("Transaction failed: txBadSeq")).toMatchObject({ kind: "stale-sequence" });
   });
 
   it("recognises balance and trustline failures before contract codes", () => {

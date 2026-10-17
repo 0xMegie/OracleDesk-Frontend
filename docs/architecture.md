@@ -25,9 +25,11 @@ A backend market links to the chain through `onChainMarketId` (market-core's `u6
 
 - `lib/stellar/clients.ts` builds a generated binding `Client` per contract, optionally with the wallet as signer. The USDC Stellar Asset Contract has no Wasm and so no bindings; `token.balance` and `token.transfer` are built with `AssembledTransaction.build`.
 - Reads are simulations (no fee, no signature).
-- Writes (`useBuy`, `useSell`, `useRedeem`, `useUsdcTransfer`) check that a wallet is connected and on the right network, simulate, then `signAndSend`.
+- Writes (`useBuy`, `useSell`, `useRedeem`, `useUsdcTransfer`) check that a wallet is connected and on the right network, run fresh contract preflight checks, simulate, then `signAndSend`. A per-address queue serializes complete build/sign/send jobs in this tab and coordinates browser tabs with Web Locks (or a local-storage lease fallback); stale-sequence errors receive one fresh-build retry. The buy, sell, redeem, and USDC-transfer paths can decode the final simulated contract invocation and show its arguments and transaction envelope for review before the wallet prompt.
 - `useBuy` quotes again immediately before building the transaction and sets `min_shares_out = minOut(quote, slippageBps)`, so slippage is enforced on-chain.
 - `useSell` turns "sell N shares" into the exact `collateral_out` the contract needs, using the contract's own FPMM math (`generated/fpmm.ts`) on freshly read reserves, with `max_shares_in` slightly above N (see the contracts repo's `docs/frontend-integration.md`).
+- `lib/stellar/preflight.ts` mirrors the contract's buy, sell, and redemption checks for immediate feedback. Missing or stale preflight data remains unknown; the contract simulation is still authoritative before signing.
+- The portfolio's connected-wallet redemption scan constructs Soroban ledger keys for each market and position, reads them in 200-entry RPC batches (scanning newest markets first, up to 20,000), and finds resolved/voided positions without relying on backend portfolio records. Batch submissions run sequentially through the same account queue; each item is saved in account-specific `sessionStorage` so progress can be resumed, retried, skipped, or stopped after the current wallet transaction. Chain-backed market, position, and balance queries are invalidated once after the batch completes.
 
 ## Amounts
 

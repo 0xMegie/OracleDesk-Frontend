@@ -13,7 +13,7 @@ const TABLES: Record<ContractName, Record<number, { message: string }>> = {
 };
 
 /** Plain-language messages for contract error names, from the user's point of view. */
-const FRIENDLY: Record<string, string> = {
+export const FRIENDLY: Record<string, string> = {
   // market-core
   Paused: "Trading is paused right now. Try again later.",
   InvalidAmount: "Enter an amount greater than zero.",
@@ -33,7 +33,7 @@ const FRIENDLY: Record<string, string> = {
   TradeCapExceeded: "This trade is above the treasury's per-trade limit.",
   MarketCapExceeded: "The treasury has reached its limit for this market.",
   DailyCapExceeded: "The treasury has reached its daily limit.",
-  InsufficientBalance: "The treasury doesn't have enough funds for this.",
+  InsufficientBalance: "You don't have enough USDC for this.",
   // resolver
   MarketNotConfigured: "This market's resolution rule hasn't been revealed yet.",
   SpecHashMismatch: "That resolution rule doesn't match what this market committed to.",
@@ -44,7 +44,16 @@ const FRIENDLY: Record<string, string> = {
 };
 
 export interface DescribedError {
-  kind: "rejected" | "insufficient-balance" | "no-trustline" | "contract" | "wrong-network" | "disconnected" | "network" | "unknown";
+  kind:
+    | "rejected"
+    | "insufficient-balance"
+    | "no-trustline"
+    | "contract"
+    | "wrong-network"
+    | "disconnected"
+    | "network"
+    | "stale-sequence"
+    | "unknown";
   message: string;
   /** Contract error name, e.g. "SlippageExceeded", when known. */
   code?: string;
@@ -74,6 +83,13 @@ function safeJson(v: unknown): string {
 export function describeError(err: unknown, contract: ContractName = "marketCore"): DescribedError {
   const text = textOf(err);
 
+  if (classifySequenceError(err)) {
+    return {
+      kind: "stale-sequence",
+      code: "txBadSeq",
+      message: "Your account sequence changed while this transaction was being prepared. Please try again.",
+    };
+  }
   if (/user (rejected|declined|denied)|rejected by (the )?user|request (was )?rejected|declined|cancell?ed by user|user closed/i.test(text)) {
     return { kind: "rejected", message: "You cancelled the request in your wallet." };
   }
@@ -104,6 +120,28 @@ export function describeError(err: unknown, contract: ContractName = "marketCore
     return { kind: "network", message: "Couldn't reach the Stellar network. Check your connection and try again." };
   }
   return { kind: "unknown", message: "Something went wrong. Please try again." };
+}
+
+/** True when a submission failed because the source account sequence is stale. */
+export function classifySequenceError(err: unknown): boolean {
+  if (err instanceof UserFacingError && err.described.code === "txBadSeq") return true;
+  if (typeof err === "object" && err !== null) {
+    const root = err as Record<string, unknown>;
+    const response = root.sendTransactionResponse;
+    const errorResult =
+      response && typeof response === "object"
+        ? (response as Record<string, unknown>).errorResult
+        : root.errorResult;
+    if (errorResult && typeof errorResult === "object") {
+      const result = errorResult as { result?: () => { switch?: () => { name?: string } } };
+      try {
+        if (result.result?.().switch?.().name === "txBadSeq") return true;
+      } catch {
+        // Fall through to SDK error text when the response is not an XDR result.
+      }
+    }
+  }
+  return /txBadSeq|tx_bad_seq|bad sequence number|sequence number is too low/i.test(textOf(err));
 }
 
 /** Thrown by write hooks so callers get a readable message in `error.message`. */

@@ -101,3 +101,14 @@ To try the same on market 0 (resolved): the buy button is disabled and the panel
 - [ ] `/premium` → **Get a daily pass** → **Pay with wallet**. Freighter shows a USDC `transfer` to the treasury (`CBTFA3EP…`) for 0.50 USDC. After approval the backend verifies it on-chain and says the pass is active. Note: until `PAYMENTS_RECIPIENT` is decided, this payment becomes treasury trading capital (see docs/STATUS.md).
 - [ ] `/copy-trade?marketId=<backend market id>&traceId=<trace id>`: the side comes from the trace's edge. With no trace or zero edge the confirm button is disabled and the page explains why.
 - [ ] `/admin` with an address not in `NEXT_PUBLIC_ADMIN_ADDRESSES` shows "Access Denied".
+
+## Transaction review, preflight, and connected-wallet redemption
+
+- [ ] Start a buy on a fresh open market. Before Freighter opens, OracleDesk shows the simulated contract/function, decoded arguments (including `market_id`, outcome, collateral and minimum shares), source account, fee, sequence, validity bounds, and pre-sign hash. Canceling the review makes no wallet request.
+- [ ] Confirm the review and check the arguments match the quote. If the transaction is rebuilt after becoming stale or after a `txBadSeq` retry, confirm it again even when the skip preference is enabled; changed arguments are highlighted. Repeat on `/copy-trade` and for a premium USDC payment.
+- [ ] Toggle **Don't show this review again**, then initiate a new transaction: the review is skipped. Reloading keeps the preference. Use **Always review transactions** on a transaction screen to clear it.
+- [ ] Try a buy on a closed market: the action is rejected with the contract-linked preflight reason before a wallet prompt. Buy, sell, and redeem preflight edge cases are also covered by the focused automated unit tests; contract simulation remains authoritative.
+- [ ] Open `/portfolio` with a connected Testnet wallet and select **Scan wallet**. The panel reports scanned markets and any discovered resolved YES/NO or voided positions with estimated payouts. It scans ledger keys directly and reports if the 20,000-market cap is reached.
+- [ ] Select **Redeem all** when positions are found. Each position is prepared and reviewed separately, then signed in sequence; confirm each in Freighter. Verify successful items show their payout and the wallet balance/position reads refresh after the batch.
+- [ ] Cause one redemption to fail while other items remain eligible. The batch continues, records the failure, and offers **Retry failed**. **Skip** omits an item; **Stop after current** does not interrupt an active wallet prompt but prevents the next redemption.
+- [ ] Reload `/portfolio` mid-batch with the same account. Saved per-account progress is shown; scan again to refresh redeemable positions, then retry failures if appropriate. Switch accounts and verify the other wallet does not see the prior account's saved progress.
