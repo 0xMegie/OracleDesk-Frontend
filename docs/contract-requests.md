@@ -47,3 +47,11 @@ the commitment hash has to rebuild the XDR by hand. A no-op view function
 that takes a `ResolutionSpec`, or a `spec_hash(spec) -> BytesN<32>` view,
 would put the type in the spec and let clients ask the contract for the
 hash instead of re-implementing it.
+
+## 5. Add a share-budget sell quote
+
+The frontend converts "sell N shares" into `collateral_out` by binary-searching
+the contract's integer-rounded `calc_sell` math, then confirms the result with
+`quote_sell`. A view such as `quote_sell_shares(market_id, outcome, shares) ->
+{ collateral_out, shares_in }` would provide the exact inversion on-chain and
+avoid repeated local work and quote simulations.

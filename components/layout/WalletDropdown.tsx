@@ -3,7 +3,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useWallet } from "@/lib/contexts/WalletContext";
-import { useUsdcBalance } from "@/lib/hooks/useStellar";
+import { useEnableUsdc, useUsdcBalance, useUsdcTrustline } from "@/lib/hooks/useStellar";
 import { NETWORK_LABEL, explorerAccount } from "@/lib/stellar/config";
 import { formatUsdc, shortAddress } from "@/lib/stellar/units";
 
@@ -13,6 +13,8 @@ const WalletDropdown = () => {
   const [copied, setCopied] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const balance = useUsdcBalance(address);
+  const trustline = useUsdcTrustline(address);
+  const enableUsdc = useEnableUsdc();
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -39,9 +41,21 @@ const WalletDropdown = () => {
   }
 
   const truncatedAddress = shortAddress(address, 6, 4);
-  const balanceText = balance.data !== undefined
+  const trustlineMissing = !isWrongNetwork && trustline.data?.kind === "missing";
+  const unauthorized = trustline.data?.kind === "present" && !trustline.data.authorized;
+  const balanceText = trustlineMissing
+    ? "USDC not enabled"
+    : balance.data !== undefined
     ? formatUsdc(balance.data, { maxDecimals: 2, minDecimals: 2, grouping: true })
     : balance.isError ? "—" : "…";
+
+  const handleEnableUsdc = async () => {
+    try {
+      await enableUsdc.mutateAsync();
+    } catch {
+      // The mutation error is rendered in the wallet menu below.
+    }
+  };
 
   const copyAddress = async () => {
     try {
@@ -101,6 +115,22 @@ const WalletDropdown = () => {
                   USDC
                 </span>
               </div>
+              {trustlineMissing && !isWrongNetwork && (
+                <button
+                  type="button"
+                  onClick={handleEnableUsdc}
+                  disabled={enableUsdc.isPending}
+                  className="mt-2 rounded-md bg-primary px-3 py-1.5 text-xs font-bold text-primary-foreground disabled:opacity-50"
+                >
+                  {enableUsdc.isPending ? "Enabling…" : "Enable USDC"}
+                </button>
+              )}
+              {unauthorized && (
+                <p className="mt-2 text-[11px] text-error">The issuer hasn&apos;t authorized your USDC trustline.</p>
+              )}
+              {enableUsdc.error && (
+                <p className="mt-2 text-[11px] text-error">{enableUsdc.error.message}</p>
+              )}
               {isWrongNetwork && (
                 <p className="mt-2 text-[11px] text-error">Your wallet is on a different network. Switch it to Stellar Testnet.</p>
               )}

@@ -25,9 +25,10 @@ A backend market links to the chain through `onChainMarketId` (market-core's `u6
 
 - `lib/stellar/clients.ts` builds a generated binding `Client` per contract, optionally with the wallet as signer. The USDC Stellar Asset Contract has no Wasm and so no bindings; `token.balance` and `token.transfer` are built with `AssembledTransaction.build`.
 - Reads are simulations (no fee, no signature).
-- Writes (`useBuy`, `useSell`, `useRedeem`, `useUsdcTransfer`) check that a wallet is connected and on the right network, simulate, then `signAndSend`.
+- Writes (`useBuy`, `useSell`, `useRedeem`, `useUsdcTransfer`) check that a wallet is connected and on the right network, require an authorized USDC trustline where needed, and set explicit transaction timeouts. Buy/sell deadlines use the latest Stellar ledger clock, not the browser's wall clock.
 - `useBuy` quotes again immediately before building the transaction and sets `min_shares_out = minOut(quote, slippageBps)`, so slippage is enforced on-chain.
-- `useSell` turns "sell N shares" into the exact `collateral_out` the contract needs, using the contract's own FPMM math (`generated/fpmm.ts`) on freshly read reserves, with `max_shares_in` slightly above N (see the contracts repo's `docs/frontend-integration.md`).
+- `useSell` solves for the largest `collateral_out` whose exact contract-rounded share cost fits the requested share budget, confirms it with `quote_sell`, and caps `max_shares_in` at the wallet's actual position.
+- `useBuy` supports exact collateral input and exact share targets; the latter finds the minimal collateral input using the same bigint FPMM rounding as the contract and confirms it with `quote_buy`.
 
 ## Amounts
 

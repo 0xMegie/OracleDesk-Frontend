@@ -8,10 +8,21 @@ import { useQuery } from "@tanstack/react-query";
 import { useMarket } from "@/lib/hooks/useMarkets";
 import { getMarketByOnChainId } from "@/lib/api/markets";
 import { ApiError } from "@/lib/api/client";
-import { useBuy, useOnChainMarket, usePosition, useQuoteBuy, useUsdcBalance } from "@/lib/hooks/useStellar";
+import {
+  useBuy,
+  useEnableUsdc,
+  useExactBuyQuote,
+  useLedgerNow,
+  useOnChainMarket,
+  usePosition,
+  useQuoteBuy,
+  useUsdcBalance,
+  useUsdcTrustline,
+} from "@/lib/hooks/useStellar";
 import { useWallet } from "@/lib/contexts/WalletContext";
 import { explorerTx } from "@/lib/stellar/config";
-import { formatUsdc, minOut, tryParseUsdc } from "@/lib/stellar/units";
+import { formatUsdc, maxIn, minOut, tryParseUsdc } from "@/lib/stellar/units";
+import { MIN_TX_TIMEOUT_S, SAFETY_MARGIN_S } from "@/lib/stellar/deadline";
 
 const SLIPPAGE_BPS = 100; // 1%
 
@@ -65,18 +76,23 @@ function MarketQuickViewContent() {
   const onChainMarketId = market?.onChainMarketId ?? onChainIdParam ?? null;
   const chain = useOnChainMarket(onChainMarketId);
 
-  const { address, isConnected, openModal } = useWallet();
+  const { address, isConnected, isWrongNetwork, openModal } = useWallet();
   const position = usePosition(onChainMarketId, address);
   const balance = useUsdcBalance(address);
+  const trustline = useUsdcTrustline(address);
+  const enableUsdc = useEnableUsdc();
   const buy = useBuy();
+  const ledger = useLedgerNow();
 
   const [showModal] = useState(true);
   const [side, setSide] = useState<"Yes" | "No">(initialSide);
   const [amountInput, setAmountInput] = useState("10");
+  const [buyMode, setBuyMode] = useState<"usdc" | "shares">("usdc");
   const [buyStatus, setBuyStatus] = useState<string | null>(null);
   const amountRaw = tryParseUsdc(amountInput);
   const debouncedAmount = useDebounced(amountRaw, 400);
-  const quote = useQuoteBuy(onChainMarketId, side, debouncedAmount);
+  const quote = useQuoteBuy(onChainMarketId, side, buyMode === "usdc" ? debouncedAmount : null);
+  const exactQuote = useExactBuyQuote(onChainMarketId, side, buyMode === "shares" ? debouncedAmount : null);
 
   // Illustrative only: there is no price history source yet.
   const sparklinePath = "M0 25 L10 22 L20 28 L30 18 L40 20 L50 15 L60 17 L70 10 L80 12 L90 5 L100 8";
@@ -87,8 +103,24 @@ function MarketQuickViewContent() {
   const yesProb = view ? Math.round(view.yesBps / 100) : backendProb;
   const noProb = 100 - yesProb;
   const chainStatus = view?.market.status;
-  // Compare with when the market was read, not "now", to keep render pure.
-  const isOpen = chainStatus?.tag === "Open" && Number(view?.market.close_time ?? 0) * 1000 > chain.dataUpdatedAt;
+  const isOpen =
+    chainStatus?.tag === "Open" &&
+    ledger.now !== null &&
+    view !== undefined &&
+    BigInt(Math.floor(ledger.now)) < view.market.close_time;
+  const secondsToClose =
+    ledger.now !== null && view
+      ? Number(view.market.close_time - BigInt(Math.floor(ledger.now)))
+      : null;
+  const safeToTrade =
+    secondsToClose !== null && secondsToClose > SAFETY_MARGIN_S + MIN_TX_TIMEOUT_S;
+  const countdown =
+    secondsToClose !== null && secondsToClose >= 0 && secondsToClose < 3_600
+      ? `Closes in ${Math.floor(secondsToClose / 60)}m ${secondsToClose % 60}s`
+      : null;
+  const trustlineMissing = trustline.data?.kind === "missing";
+  const trustlineUnauthorized =
+    trustline.data?.kind === "present" && !trustline.data.authorized;
 
   const isLoading = backendById.isLoading || (backendByChainId.isLoading && !marketId) || (chain.isLoading && !market);
   const notFound = !market && !view;
@@ -99,19 +131,64 @@ function MarketQuickViewContent() {
       return;
     }
     if (!onChainMarketId) return;
+    if (trustlineMissing) {
+      setBuyStatus("Enable your USDC trustline below, then click Buy again.");
+      return;
+    }
+    if (trustlineUnauthorized) {
+      setBuyStatus("The issuer hasn't authorized your USDC trustline.");
+      return;
+    }
+    if (isWrongNetwork) {
+      setBuyStatus("Switch your wallet to Stellar Testnet to place this trade.");
+      return;
+    }
     if (!amountRaw || amountRaw <= 0n) {
-      setBuyStatus("Enter an amount like 10 or 2.5.");
+      setBuyStatus(buyMode === "usdc" ? "Enter an amount like 10 or 2.5." : "Enter a share amount greater than zero.");
+      return;
+    }
+    if (ledger.now === null) {
+      setBuyStatus("Checking market time…");
+      return;
+    }
+    if (!safeToTrade) {
+      setBuyStatus("This market closes too soon to safely place a trade.");
       return;
     }
     setBuyStatus("Getting a fresh quote, then asking your wallet to sign…");
     try {
-      const result = await buy.mutateAsync({ marketId: onChainMarketId, outcome: side, collateralIn: amountRaw, slippageBps: SLIPPAGE_BPS });
+      const result =
+        buyMode === "shares"
+          ? await buy.mutateAsync({
+              marketId: onChainMarketId,
+              outcome: side,
+              mode: "shares",
+              targetShares: amountRaw,
+              maxCollateralIn: exactQuote.data?.collateralIn,
+              slippageBps: SLIPPAGE_BPS,
+            })
+          : await buy.mutateAsync({
+              marketId: onChainMarketId,
+              outcome: side,
+              collateralIn: amountRaw,
+              slippageBps: SLIPPAGE_BPS,
+            });
       setBuyStatus(
         `Bought ${formatUsdc(result.sharesOut, { maxDecimals: 2 })} ${side.toUpperCase()} shares.` +
           (result.txHash ? ` View: ${explorerTx(result.txHash)}` : ""),
       );
     } catch (err) {
       setBuyStatus(err instanceof Error ? err.message : "The trade didn't go through.");
+    }
+  };
+
+  const handleEnableUsdc = async () => {
+    setBuyStatus("Checking XLM reserve, then opening your wallet…");
+    try {
+      await enableUsdc.mutateAsync();
+      setBuyStatus("USDC is enabled. Review your amount and click Buy to submit the trade.");
+    } catch (err) {
+      setBuyStatus(err instanceof Error ? err.message : "Couldn't enable USDC.");
     }
   };
 
@@ -188,6 +265,7 @@ function MarketQuickViewContent() {
                     {statusLabel}
                     {chainStatus && <SourceTag source="chain" />}
                   </span>
+                  {countdown && <span className="text-[10px] font-data-mono text-on-surface-variant">{countdown}</span>}
                   <span className="font-label-caps text-label-caps text-outline uppercase font-bold tracking-wider">{categoryLabel}</span>
                 </div>
                 <Link 
@@ -268,8 +346,12 @@ function MarketQuickViewContent() {
                 {onChainMarketId !== null && (
                   <div className="space-y-3">
                     <div className="flex items-center gap-3">
+                      <div className="inline-flex rounded border border-outline-variant p-0.5" aria-label="Buy amount unit">
+                        <button type="button" aria-pressed={buyMode === "usdc"} onClick={() => setBuyMode("usdc")} className={`px-2 py-1 text-[10px] rounded ${buyMode === "usdc" ? "bg-primary text-primary-foreground" : "text-on-surface-variant"}`}>USDC</button>
+                        <button type="button" aria-pressed={buyMode === "shares"} onClick={() => setBuyMode("shares")} className={`px-2 py-1 text-[10px] rounded ${buyMode === "shares" ? "bg-primary text-primary-foreground" : "text-on-surface-variant"}`}>Shares</button>
+                      </div>
                       <label htmlFor="buy-amount" className="font-label-caps text-label-caps text-on-surface-variant uppercase text-[10px] shrink-0">
-                        Amount (USDC)
+                        Amount ({buyMode === "usdc" ? "USDC" : `${side.toUpperCase()} shares`})
                       </label>
                       <input
                         id="buy-amount"
@@ -281,7 +363,18 @@ function MarketQuickViewContent() {
                       <button
                         type="button"
                         onClick={handleBuy}
-                        disabled={buy.isPending || (isConnected && !isOpen)}
+                        disabled={
+                          buy.isPending ||
+                          (isConnected &&
+                            (!isOpen ||
+                              !safeToTrade ||
+                              ledger.now === null ||
+                              trustlineMissing ||
+                              trustlineUnauthorized ||
+                              (buyMode === "shares" &&
+                                (!exactQuote.data ||
+                                  (balance.data !== undefined && balance.data < exactQuote.data.collateralIn)))))
+                        }
                         className="bg-primary text-primary-foreground px-4 py-2 rounded-lg font-label-caps text-label-caps font-bold disabled:opacity-50"
                       >
                         {!isConnected ? "Connect" : buy.isPending ? "Buying…" : `Buy ${side.toUpperCase()}`}
@@ -290,8 +383,14 @@ function MarketQuickViewContent() {
                     <div className="flex justify-between text-[11px] font-data-mono text-on-surface-variant">
                       <span>
                         {amountRaw === null
-                          ? "Enter an amount like 10 or 2.5"
-                          : quote.data !== undefined
+                          ? buyMode === "usdc" ? "Enter an amount like 10 or 2.5" : "Enter a share amount"
+                          : buyMode === "shares" && exactQuote.data
+                            ? `Costs ≈ ${formatUsdc(exactQuote.data.collateralIn, { maxDecimals: 2 })} USDC (fee ${formatUsdc(exactQuote.data.fee, { maxDecimals: 2 })}), at most ${formatUsdc(maxIn(exactQuote.data.collateralIn, SLIPPAGE_BPS), { maxDecimals: 2 })} with 1% slippage`
+                            : buyMode === "shares" && exactQuote.error
+                              ? exactQuote.error.message
+                              : buyMode === "shares" && exactQuote.isFetching
+                                ? "Quoting exact share amount…"
+                                : quote.data !== undefined
                             ? `≈ ${formatUsdc(quote.data, { maxDecimals: 2 })} shares, at least ${formatUsdc(minOut(quote.data, SLIPPAGE_BPS), { maxDecimals: 2 })} (1% slippage)`
                             : quote.error ? quote.error.message : quote.isFetching ? "Quoting…" : ""}
                       </span>
@@ -300,6 +399,19 @@ function MarketQuickViewContent() {
                     {!isOpen && view && (
                       <p className="text-[11px] text-on-surface-variant">This market is closed to trading.</p>
                     )}
+                    {ledger.now === null && <p className="text-[11px] text-on-surface-variant">Checking market time…</p>}
+                    {isOpen && !safeToTrade && <p className="text-[11px] text-on-surface-variant">Trading is disabled this close to the market deadline.</p>}
+                    {trustlineMissing && !isWrongNetwork && (
+                      <div className="rounded-lg border border-outline-variant bg-surface-container-low p-3 space-y-2">
+                        <p className="text-xs text-on-surface-variant">
+                          Enable USDC once to buy on Stellar. This creates a trustline and locks one base reserve (typically 0.5 XLM); it does not submit your trade.
+                        </p>
+                        <button type="button" onClick={handleEnableUsdc} disabled={enableUsdc.isPending} className="bg-primary text-primary-foreground px-3 py-2 rounded-lg text-xs font-bold disabled:opacity-50">
+                          {enableUsdc.isPending ? "Enabling…" : "Enable USDC"}
+                        </button>
+                      </div>
+                    )}
+                    {trustlineUnauthorized && <p className="text-[11px] text-error">The issuer hasn&apos;t authorized your USDC trustline.</p>}
                     {position.data && (position.data.yes > 0n || position.data.no > 0n) && (
                       <p className="text-[11px] font-data-mono text-on-surface">
                         Your position: {formatUsdc(position.data.yes, { maxDecimals: 2 })} YES · {formatUsdc(position.data.no, { maxDecimals: 2 })} NO

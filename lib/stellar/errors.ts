@@ -44,8 +44,9 @@ const FRIENDLY: Record<string, string> = {
 };
 
 export interface DescribedError {
-  kind: "rejected" | "insufficient-balance" | "no-trustline" | "contract" | "wrong-network" | "disconnected" | "network" | "unknown";
+  kind: "rejected" | "insufficient-balance" | "no-trustline" | "low-reserve" | "contract" | "wrong-network" | "disconnected" | "network" | "unknown";
   message: string;
+  action?: "enable-usdc";
   /** Contract error name, e.g. "SlippageExceeded", when known. */
   code?: string;
 }
@@ -81,7 +82,11 @@ export function describeError(err: unknown, contract: ContractName = "marketCore
     return {
       kind: "no-trustline",
       message: "Your account has no USDC trustline. Add the USDC asset in your wallet first.",
+      action: "enable-usdc",
     };
+  }
+  if (/op_low_reserve|opLowReserve|txInsufficientBalance|tx_insufficient_balance/i.test(text)) {
+    return { kind: "low-reserve", message: "Your account needs more spendable XLM to add the USDC trustline." };
   }
   if (/balance is not sufficient|resulting balance is not within the allowed range|insufficient (balance|funds)|BalanceError|op_underfunded/i.test(text)) {
     return { kind: "insufficient-balance", message: "You don't have enough USDC for this." };

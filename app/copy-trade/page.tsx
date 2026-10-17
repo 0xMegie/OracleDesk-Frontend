@@ -7,9 +7,20 @@ import { getTrace, ReasoningTrace } from "@/lib/api/traces";
 import { confirmCopyTrade, initiateCopyTrade } from "@/lib/api/trade";
 import { ApiError } from "@/lib/api/client";
 import { useMarket } from "@/lib/hooks/useMarkets";
-import { useBuy, useQuoteBuy, useUsdcBalance } from "@/lib/hooks/useStellar";
+import {
+  useBuy,
+  useEnableUsdc,
+  fetchOnChainMarket,
+  useLedgerNow,
+  useOnChainMarket,
+  useQuoteBuy,
+  useUsdcBalance,
+  useUsdcTrustline,
+} from "@/lib/hooks/useStellar";
 import { explorerTx } from "@/lib/stellar/config";
 import { formatUsdc, minOut, shareOf } from "@/lib/stellar/units";
+import { MIN_TX_TIMEOUT_S, SAFETY_MARGIN_S } from "@/lib/stellar/deadline";
+import { getLedgerNow } from "@/lib/stellar/ledger-clock";
 
 /** Wait this long after the slider stops before asking for a new quote. */
 const QUOTE_DEBOUNCE_MS = 400;
@@ -35,8 +46,12 @@ function CopyTradeContent() {
   const [traceError, setTraceError] = useState<string | null>(null);
   const { data: market } = useMarket(marketIdParam ?? trace?.marketId ?? undefined);
   const onChainMarketId = market?.onChainMarketId ?? null;
+  const onChainMarket = useOnChainMarket(onChainMarketId);
 
   const balance = useUsdcBalance(address);
+  const trustline = useUsdcTrustline(address);
+  const enableUsdc = useEnableUsdc();
+  const ledger = useLedgerNow();
   const buy = useBuy();
 
   // Allocation as a share of the wallet's USDC balance, in basis points.
@@ -62,6 +77,19 @@ function CopyTradeContent() {
   const debouncedAmount = useDebounced(amountRaw, QUOTE_DEBOUNCE_MS);
   const quote = useQuoteBuy(onChainMarketId, side ?? "Yes", side ? debouncedAmount : null);
   const minShares = quote.data !== undefined ? minOut(quote.data, slippageBps) : null;
+  const closeTime = onChainMarket.data?.market.close_time;
+  const secondsToClose =
+    closeTime !== undefined && ledger.now !== null
+      ? Number(closeTime - BigInt(Math.floor(ledger.now)))
+      : null;
+  const marketCanTrade =
+    onChainMarket.data?.market.status.tag === "Open" &&
+    secondsToClose !== null &&
+    secondsToClose > SAFETY_MARGIN_S + MIN_TX_TIMEOUT_S;
+  const trustlineMissing = trustline.data?.kind === "missing";
+  const trustlineReady =
+    trustline.data?.kind === "native" ||
+    (trustline.data?.kind === "present" && trustline.data.authorized);
 
   const handleSliderInteraction = (clientX: number) => {
     if (!sliderRef.current) return;
@@ -114,6 +142,24 @@ function CopyTradeContent() {
       setStatusMessage("This market isn't on-chain yet, so it can't be traded.");
       return;
     }
+    if (!onChainMarket.data) {
+      setStatusMessage("Checking the on-chain market and ledger time…");
+      return;
+    }
+    if (!marketCanTrade) {
+      setStatusMessage("This market is closed or too close to its deadline to safely place a trade.");
+      return;
+    }
+    if (!trustlineReady) {
+      setStatusMessage(
+        trustlineMissing
+          ? "Enable your USDC trustline before copying this trade."
+          : trustline.data?.kind === "present"
+            ? "The issuer hasn't authorized your USDC trustline."
+            : "Checking your USDC trustline…",
+      );
+      return;
+    }
     if (!amountRaw || amountRaw <= 0n) {
       setStatusMessage("Choose an allocation greater than zero. You may need USDC in your wallet first.");
       return;
@@ -124,6 +170,17 @@ function CopyTradeContent() {
       setStatusMessage("Signing in to OracleDesk…");
       if (!(await ensureSession())) {
         setStatusMessage("You need to sign in with your wallet to copy trades.");
+        return;
+      }
+
+      const freshMarket = await fetchOnChainMarket(onChainMarketId);
+      const freshLedgerNow = getLedgerNow();
+      if (
+        freshLedgerNow === null ||
+        freshMarket.market.status.tag !== "Open" ||
+        BigInt(Math.floor(freshLedgerNow)) + BigInt(SAFETY_MARGIN_S + MIN_TX_TIMEOUT_S) >= freshMarket.market.close_time
+      ) {
+        setStatusMessage("This market is closed or too close to its deadline to safely place a trade.");
         return;
       }
 
@@ -156,6 +213,16 @@ function CopyTradeContent() {
       }
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleEnableUsdc = async () => {
+    setStatusMessage("Checking XLM reserve, then opening your wallet…");
+    try {
+      await enableUsdc.mutateAsync();
+      setStatusMessage("USDC is enabled. Click Confirm Copy Trade when you're ready.");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Couldn't enable USDC.");
     }
   };
 
@@ -325,6 +392,29 @@ function CopyTradeContent() {
             </div>
 
             <div className="space-y-3">
+              {secondsToClose !== null && secondsToClose >= 0 && secondsToClose < 3_600 && (
+                <p className="text-center text-xs font-data-mono text-on-surface-variant">
+                  Closes in {Math.floor(secondsToClose / 60)}m {secondsToClose % 60}s
+                </p>
+              )}
+              {onChainMarket.data && !marketCanTrade && (
+                <p className="text-center text-xs text-error">
+                  This market is closed or too close to its deadline to safely place a trade.
+                </p>
+              )}
+              {trustlineMissing && !isWrongNetwork && (
+                <div className="rounded-lg border border-outline-variant bg-surface p-3 text-sm text-on-surface-variant">
+                  <p className="mb-2">Enable USDC before OracleDesk can submit the copied trade. Enabling it will not place the trade.</p>
+                  <button
+                    type="button"
+                    onClick={handleEnableUsdc}
+                    disabled={enableUsdc.isPending}
+                    className="rounded-md bg-primary px-3 py-2 text-xs font-bold text-primary-foreground disabled:opacity-50"
+                  >
+                    {enableUsdc.isPending ? "Enabling…" : "Enable USDC"}
+                  </button>
+                </div>
+              )}
               {statusMessage ? (
                 <div className="rounded-2xl border border-outline-variant bg-surface p-4 text-sm text-on-surface-variant">
                   {statusMessage}
@@ -342,7 +432,7 @@ function CopyTradeContent() {
                   className="flex-[2] bg-[#005f73] text-primary-foreground py-4 rounded-lg font-headline-sm text-headline-sm shadow-lg shadow-primary-container/20 hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                   onClick={handleConfirm}
                   type="button"
-                  disabled={isSubmitting || !side}
+                  disabled={isSubmitting || !side || !marketCanTrade || !trustlineReady || ledger.now === null}
                 >
                   <span className="material-symbols-outlined text-xl">bolt</span>
                   {isSubmitting ? "Submitting..." : "Confirm Copy Trade"}
