@@ -12,6 +12,7 @@ import { useBuy, useOnChainMarket, usePosition, useQuoteBuy, useUsdcBalance } fr
 import { useWallet } from "@/lib/contexts/WalletContext";
 import { explorerTx } from "@/lib/stellar/config";
 import { formatUsdc, minOut, tryParseUsdc } from "@/lib/stellar/units";
+import { buyBreakdown } from "@/lib/stellar/buy-breakdown";
 
 const SLIPPAGE_BPS = 100; // 1%
 
@@ -77,11 +78,17 @@ function MarketQuickViewContent() {
   const amountRaw = tryParseUsdc(amountInput);
   const debouncedAmount = useDebounced(amountRaw, 400);
   const quote = useQuoteBuy(onChainMarketId, side, debouncedAmount);
+  const view = chain.data;
+  const breakdown = view && debouncedAmount && debouncedAmount > 0n
+    ? (() => {
+        const [bought, other] = side === "Yes" ? [view.market.reserve_yes, view.market.reserve_no] : [view.market.reserve_no, view.market.reserve_yes];
+        try { return buyBreakdown(bought, other, debouncedAmount, BigInt(view.market.fee_bps)); } catch { return null; }
+      })()
+    : null;
 
   // Illustrative only: there is no price history source yet.
   const sparklinePath = "M0 25 L10 22 L20 28 L30 18 L40 20 L50 15 L60 17 L70 10 L80 12 L90 5 L100 8";
 
-  const view = chain.data;
   const fromChain = Boolean(view);
   const backendProb = market ? Math.round((market.currentYesProb ?? market.initialYesProb) * 100) : 50;
   const yesProb = view ? Math.round(view.yesBps / 100) : backendProb;
@@ -297,6 +304,13 @@ function MarketQuickViewContent() {
                       </span>
                       {balance.data !== undefined && <span>Balance {formatUsdc(balance.data, { maxDecimals: 2, grouping: true })}</span>}
                     </div>
+                    {breakdown && (
+                      <div className="grid grid-cols-3 gap-2 text-[10px] font-data-mono text-on-surface-variant" aria-label="Trade breakdown">
+                        <span>Fee {formatUsdc(breakdown.fee, { maxDecimals: 4 })} USDC</span>
+                        <span>Impact {(Number(breakdown.priceImpactBps) / 100).toFixed(2)}%</span>
+                        <span>Net {formatUsdc(breakdown.net, { maxDecimals: 4 })} USDC</span>
+                      </div>
+                    )}
                     {!isOpen && view && (
                       <p className="text-[11px] text-on-surface-variant">This market is closed to trading.</p>
                     )}
