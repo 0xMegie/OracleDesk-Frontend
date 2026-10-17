@@ -1,4 +1,4 @@
-import { Address, nativeToScVal, scValToNative } from "@stellar/stellar-sdk";
+import { Address, nativeToScVal, rpc, scValToNative } from "@stellar/stellar-sdk";
 import { AssembledTransaction } from "@stellar/stellar-sdk/contract";
 import type { ClientOptions, SignTransaction } from "@stellar/stellar-sdk/contract";
 import { Client as MarketCoreClient, type Category, type Outcome } from "./generated/market-core";
@@ -11,6 +11,17 @@ import { CONTRACTS, NETWORK_PASSPHRASE, RPC_URL } from "./config";
 export interface Signer {
   publicKey: string;
   signTransaction: SignTransaction;
+}
+
+let _rpcServer: rpc.Server | null = null;
+/** Memoised Stellar RPC server instance. */
+export function rpcServer(): rpc.Server {
+  if (!_rpcServer) {
+    _rpcServer = new rpc.Server(RPC_URL, {
+      allowHttp: RPC_URL.startsWith("http://"),
+    });
+  }
+  return _rpcServer;
 }
 
 function options(contractId: string, signer?: Signer): ClientOptions {
@@ -34,6 +45,14 @@ export const reasoningRegistry = (signer?: Signer) =>
  * bindings; calls are built directly with AssembledTransaction.
  */
 export const token = {
+  name(contractId: string = CONTRACTS.usdc): Promise<AssembledTransaction<string>> {
+    return AssembledTransaction.build<string>({
+      ...options(contractId),
+      method: "name",
+      args: [],
+      parseResultXdr: (v) => String(scValToNative(v)),
+    });
+  },
   balance(owner: string, contractId: string = CONTRACTS.usdc): Promise<AssembledTransaction<bigint>> {
     return AssembledTransaction.build<bigint>({
       ...options(contractId),
@@ -46,9 +65,11 @@ export const token = {
     params: { from: string; to: string; amount: bigint },
     signer: Signer,
     contractId: string = CONTRACTS.usdc,
+    txOptions: { timeoutInSeconds?: number } = {},
   ): Promise<AssembledTransaction<null>> {
     return AssembledTransaction.build<null>({
       ...options(contractId, signer),
+      ...txOptions,
       method: "transfer",
       args: [
         new Address(params.from).toScVal(),

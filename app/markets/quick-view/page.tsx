@@ -1,6 +1,6 @@
 "use client";
 
-import React, { Suspense, useEffect, useState } from "react";
+import React, { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -8,10 +8,11 @@ import { useQuery } from "@tanstack/react-query";
 import { useMarket } from "@/lib/hooks/useMarkets";
 import { getMarketByOnChainId } from "@/lib/api/markets";
 import { ApiError } from "@/lib/api/client";
-import { useBuy, useOnChainMarket, usePosition, useQuoteBuy, useUsdcBalance } from "@/lib/hooks/useStellar";
+import { useBuy, useOnChainMarket, usePosition, useQuoteBuy, useUsdcBalance, useAccountReserve, usePrepareBuy } from "@/lib/hooks/useStellar";
 import { useWallet } from "@/lib/contexts/WalletContext";
 import { explorerTx } from "@/lib/stellar/config";
 import { formatUsdc, minOut, tryParseUsdc } from "@/lib/stellar/units";
+import { buyBreakdown } from "@/lib/stellar/buy-breakdown";
 
 const SLIPPAGE_BPS = 100; // 1%
 
@@ -47,6 +48,27 @@ export default function MarketQuickViewPage() {
   );
 }
 
+function renderTxPhase(phase: TxPhase): string | null {
+  switch (phase.name) {
+    case "building":
+      return null;
+    case "simulating":
+      return "Simulating transaction…";
+    case "awaiting-signature":
+      return "Waiting for your wallet…";
+    case "submitting":
+      return "Sending to the network…";
+    case "pending":
+      return "Waiting for a ledger…";
+    case "confirmed":
+      return "Transaction confirmed.";
+    case "failed":
+      return phase.error.message;
+    case "expired":
+      return "Transaction expired without confirmation.";
+  }
+}
+
 function MarketQuickViewContent() {
   const searchParams = useSearchParams();
   const marketId = searchParams.get("marketId");
@@ -65,30 +87,71 @@ function MarketQuickViewContent() {
   const onChainMarketId = market?.onChainMarketId ?? onChainIdParam ?? null;
   const chain = useOnChainMarket(onChainMarketId);
 
-  const { address, isConnected, openModal } = useWallet();
+  const { address, isConnected, isWrongNetwork, openModal } = useWallet();
   const position = usePosition(onChainMarketId, address);
   const balance = useUsdcBalance(address);
+  const reserve = useAccountReserve(address);
   const buy = useBuy();
+  const submitQueue = useSubmitQueueState(address);
+  const [now, setNow] = useState<number | null>(null);
 
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(interval);
+  }, []);
   const [showModal] = useState(true);
   const [side, setSide] = useState<"Yes" | "No">(initialSide);
   const [amountInput, setAmountInput] = useState("10");
+  const [buyMode, setBuyMode] = useState<"usdc" | "shares">("usdc");
   const [buyStatus, setBuyStatus] = useState<string | null>(null);
+  const [reviewModel, setReviewModel] = useState<{ model: ReviewModel; changedFrom?: ReviewModel } | null>(null);
+  const reviewResolver = useRef<((approved: boolean) => void) | null>(null);
   const amountRaw = tryParseUsdc(amountInput);
   const debouncedAmount = useDebounced(amountRaw, 400);
   const quote = useQuoteBuy(onChainMarketId, side, debouncedAmount);
+  const view = chain.data;
+  const breakdown = view && debouncedAmount && debouncedAmount > 0n
+    ? (() => {
+        const [bought, other] = side === "Yes" ? [view.market.reserve_yes, view.market.reserve_no] : [view.market.reserve_no, view.market.reserve_yes];
+        try { return buyBreakdown(bought, other, debouncedAmount, BigInt(view.market.fee_bps)); } catch { return null; }
+      })()
+    : null;
 
   // Illustrative only: there is no price history source yet.
   const sparklinePath = "M0 25 L10 22 L20 28 L30 18 L40 20 L50 15 L60 17 L70 10 L80 12 L90 5 L100 8";
 
-  const view = chain.data;
   const fromChain = Boolean(view);
   const backendProb = market ? Math.round((market.currentYesProb ?? market.initialYesProb) * 100) : 50;
   const yesProb = view ? Math.round(view.yesBps / 100) : backendProb;
   const noProb = 100 - yesProb;
   const chainStatus = view?.market.status;
-  // Compare with when the market was read, not "now", to keep render pure.
+  // Use a timer-backed timestamp so freshness changes are reflected without impure render reads.
   const isOpen = chainStatus?.tag === "Open" && Number(view?.market.close_time ?? 0) * 1000 > chain.dataUpdatedAt;
+  const isFresh = (updatedAt: number, maxAge: number) =>
+    now !== null && now >= updatedAt && now - updatedAt <= maxAge;
+  const tradePreflight = preflightBuy(
+    {
+      config:
+        config.data && isFresh(config.dataUpdatedAt, 60_000)
+          ? { paused: config.data.paused }
+          : undefined,
+      market: view?.market,
+      marketIsStale: Boolean(view && now !== null && !isFresh(chain.dataUpdatedAt, 15_000)),
+      ledgerNow:
+        ledgerNow.data !== undefined && isFresh(ledgerNow.dataUpdatedAt, 5_000)
+          ? ledgerNow.data
+          : undefined,
+      position: position.data && isFresh(position.dataUpdatedAt, 15_000) ? position.data : undefined,
+      positionIsStale: Boolean(position.data && now !== null && !isFresh(position.dataUpdatedAt, 15_000)),
+      usdcBalance:
+        balance.data !== undefined && isFresh(balance.dataUpdatedAt, 15_000)
+          ? balance.data
+          : undefined,
+    },
+    side,
+    amountRaw ?? 0n,
+  );
+  const buyPreflightFailure = tradePreflight.ok === false ? tradePreflight.failures[0] : null;
 
   const isLoading = backendById.isLoading || (backendByChainId.isLoading && !marketId) || (chain.isLoading && !market);
   const notFound = !market && !view;
@@ -99,19 +162,55 @@ function MarketQuickViewContent() {
       return;
     }
     if (!onChainMarketId) return;
-    if (!amountRaw || amountRaw <= 0n) {
-      setBuyStatus("Enter an amount like 10 or 2.5.");
+    if (trustlineMissing) {
+      setBuyStatus("Enable your USDC trustline below, then click Buy again.");
       return;
     }
-    setBuyStatus("Getting a fresh quote, then asking your wallet to sign…");
+    if (trustlineUnauthorized) {
+      setBuyStatus("The issuer hasn't authorized your USDC trustline.");
+      return;
+    }
+    if (isWrongNetwork) {
+      setBuyStatus("Switch your wallet to Stellar Testnet to place this trade.");
+      return;
+    }
+    if (!amountRaw || amountRaw <= 0n) {
+      setBuyStatus(buyMode === "usdc" ? "Enter an amount like 10 or 2.5." : "Enter a share amount greater than zero.");
+      return;
+    }
+    if (ledger.now === null) {
+      setBuyStatus("Checking market time…");
+      return;
+    }
+    if (!safeToTrade) {
+      setBuyStatus("This market closes too soon to safely place a trade.");
+      return;
+    }
+    setBuyStatus(null);
     try {
-      const result = await buy.mutateAsync({ marketId: onChainMarketId, outcome: side, collateralIn: amountRaw, slippageBps: SLIPPAGE_BPS });
+      const result = await buy.mutateAsync({
+        marketId: onChainMarketId,
+        outcome: side,
+        collateralIn: amountRaw,
+        slippageBps: SLIPPAGE_BPS,
+        prepared: prepareBuy.data,
+      });
       setBuyStatus(
         `Bought ${formatUsdc(result.sharesOut, { maxDecimals: 2 })} ${side.toUpperCase()} shares.` +
           (result.txHash ? ` View: ${explorerTx(result.txHash)}` : ""),
       );
     } catch (err) {
       setBuyStatus(err instanceof Error ? err.message : "The trade didn't go through.");
+    }
+  };
+
+  const handleEnableUsdc = async () => {
+    setBuyStatus("Checking XLM reserve, then opening your wallet…");
+    try {
+      await enableUsdc.mutateAsync();
+      setBuyStatus("USDC is enabled. Review your amount and click Buy to submit the trade.");
+    } catch (err) {
+      setBuyStatus(err instanceof Error ? err.message : "Couldn't enable USDC.");
     }
   };
 
@@ -188,6 +287,7 @@ function MarketQuickViewContent() {
                     {statusLabel}
                     {chainStatus && <SourceTag source="chain" />}
                   </span>
+                  {countdown && <span className="text-[10px] font-data-mono text-on-surface-variant">{countdown}</span>}
                   <span className="font-label-caps text-label-caps text-outline uppercase font-bold tracking-wider">{categoryLabel}</span>
                 </div>
                 <Link 
@@ -268,8 +368,12 @@ function MarketQuickViewContent() {
                 {onChainMarketId !== null && (
                   <div className="space-y-3">
                     <div className="flex items-center gap-3">
+                      <div className="inline-flex rounded border border-outline-variant p-0.5" aria-label="Buy amount unit">
+                        <button type="button" aria-pressed={buyMode === "usdc"} onClick={() => setBuyMode("usdc")} className={`px-2 py-1 text-[10px] rounded ${buyMode === "usdc" ? "bg-primary text-primary-foreground" : "text-on-surface-variant"}`}>USDC</button>
+                        <button type="button" aria-pressed={buyMode === "shares"} onClick={() => setBuyMode("shares")} className={`px-2 py-1 text-[10px] rounded ${buyMode === "shares" ? "bg-primary text-primary-foreground" : "text-on-surface-variant"}`}>Shares</button>
+                      </div>
                       <label htmlFor="buy-amount" className="font-label-caps text-label-caps text-on-surface-variant uppercase text-[10px] shrink-0">
-                        Amount (USDC)
+                        Amount ({buyMode === "usdc" ? "USDC" : `${side.toUpperCase()} shares`})
                       </label>
                       <input
                         id="buy-amount"
@@ -281,32 +385,124 @@ function MarketQuickViewContent() {
                       <button
                         type="button"
                         onClick={handleBuy}
-                        disabled={buy.isPending || (isConnected && !isOpen)}
+                        disabled={
+                          buy.isPending ||
+                          (isConnected && !isOpen) ||
+                          (isConnected && isUnfunded) ||
+                          (isConnected && isInsufficientXlm)
+                        }
                         className="bg-primary text-primary-foreground px-4 py-2 rounded-lg font-label-caps text-label-caps font-bold disabled:opacity-50"
                       >
-                        {!isConnected ? "Connect" : buy.isPending ? "Buying…" : `Buy ${side.toUpperCase()}`}
+                        {!isConnected
+                          ? "Connect"
+                          : buy.isPending
+                          ? (buy.phase.name === "awaiting-signature" ? "Signing…" : "Buying…")
+                          : isUnfunded
+                          ? "Fund Account"
+                          : isInsufficientXlm
+                          ? "Insufficient XLM"
+                          : `Buy ${side.toUpperCase()}`}
                       </button>
                     </div>
                     <div className="flex justify-between text-[11px] font-data-mono text-on-surface-variant">
                       <span>
                         {amountRaw === null
-                          ? "Enter an amount like 10 or 2.5"
-                          : quote.data !== undefined
+                          ? buyMode === "usdc" ? "Enter an amount like 10 or 2.5" : "Enter a share amount"
+                          : buyMode === "shares" && exactQuote.data
+                            ? `Costs ≈ ${formatUsdc(exactQuote.data.collateralIn, { maxDecimals: 2 })} USDC (fee ${formatUsdc(exactQuote.data.fee, { maxDecimals: 2 })}), at most ${formatUsdc(maxIn(exactQuote.data.collateralIn, SLIPPAGE_BPS), { maxDecimals: 2 })} with 1% slippage`
+                            : buyMode === "shares" && exactQuote.error
+                              ? exactQuote.error.message
+                              : buyMode === "shares" && exactQuote.isFetching
+                                ? "Quoting exact share amount…"
+                                : quote.data !== undefined
                             ? `≈ ${formatUsdc(quote.data, { maxDecimals: 2 })} shares, at least ${formatUsdc(minOut(quote.data, SLIPPAGE_BPS), { maxDecimals: 2 })} (1% slippage)`
                             : quote.error ? quote.error.message : quote.isFetching ? "Quoting…" : ""}
                       </span>
                       {balance.data !== undefined && <span>Balance {formatUsdc(balance.data, { maxDecimals: 2, grouping: true })}</span>}
                     </div>
+
+                    {/* Network fee & reserve row */}
+                    {isConnected && (
+                      <div
+                        className="flex justify-between items-center text-[11px] font-data-mono text-on-surface-variant"
+                        title={fees ? `Inclusion: ${formatXlm(fees.inclusionFee)} XLM · Resource: ${formatXlm(fees.resourceFee)} XLM (assumes the network base reserve of 0.5 XLM)` : "assumes the network base reserve of 0.5 XLM"}
+                      >
+                        <span>
+                          Network fee {fees ? `≈ ${formatXlm(fees.totalFee)} XLM` : prepareBuy.isLoading ? "≈ calculating…" : "—"} ·{" "}
+                          {reserve.isLoading
+                            ? "checking XLM…"
+                            : reserve.isError
+                            ? "couldn't check XLM balance"
+                            : reserve.data && !reserve.data.funded
+                            ? "unfunded"
+                            : reserve.data
+                            ? `spendable ${formatXlm(reserve.data.spendable, { maxDecimals: 1 })} XLM`
+                            : "spendable —"}
+                        </span>
+                        {fees && (
+                          <span className="text-[10px] text-outline">
+                            (inclusion {formatXlm(fees.inclusionFee)} + resource {formatXlm(fees.resourceFee)})
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Blocking warnings */}
+                    {isConnected && isUnfunded && (
+                      <p className="text-xs text-error font-medium" role="alert">
+                        Fund this account with XLM first.
+                      </p>
+                    )}
+                    {isConnected && isInsufficientXlm && xlmDeficit !== null && (
+                      <p className="text-xs text-error font-medium" role="alert">
+                        You need about {formatXlm(xlmDeficit)} more XLM to pay the network fee.
+                      </p>
+                    )}
+
                     {!isOpen && view && (
                       <p className="text-[11px] text-on-surface-variant">This market is closed to trading.</p>
                     )}
+                    {ledger.now === null && <p className="text-[11px] text-on-surface-variant">Checking market time…</p>}
+                    {isOpen && !safeToTrade && <p className="text-[11px] text-on-surface-variant">Trading is disabled this close to the market deadline.</p>}
+                    {trustlineMissing && !isWrongNetwork && (
+                      <div className="rounded-lg border border-outline-variant bg-surface-container-low p-3 space-y-2">
+                        <p className="text-xs text-on-surface-variant">
+                          Enable USDC once to buy on Stellar. This creates a trustline and locks one base reserve (typically 0.5 XLM); it does not submit your trade.
+                        </p>
+                        <button type="button" onClick={handleEnableUsdc} disabled={enableUsdc.isPending} className="bg-primary text-primary-foreground px-3 py-2 rounded-lg text-xs font-bold disabled:opacity-50">
+                          {enableUsdc.isPending ? "Enabling…" : "Enable USDC"}
+                        </button>
+                      </div>
+                    )}
+                    {trustlineUnauthorized && <p className="text-[11px] text-error">The issuer hasn&apos;t authorized your USDC trustline.</p>}
                     {position.data && (position.data.yes > 0n || position.data.no > 0n) && (
                       <p className="text-[11px] font-data-mono text-on-surface">
                         Your position: {formatUsdc(position.data.yes, { maxDecimals: 2 })} YES · {formatUsdc(position.data.no, { maxDecimals: 2 })} NO
                         <SourceTag source="chain" />
                       </p>
                     )}
-                    {buyStatus && <p className="text-xs text-on-surface-variant break-all" role="status">{buyStatus}</p>}
+
+                    {/* Observable tx lifecycle phase */}
+                    {buy.isPending && (
+                      <div className="text-xs text-on-surface-variant flex items-center gap-1.5" role="status">
+                        <span>{renderTxPhase(buy.phase) ?? "Processing transaction…"}</span>
+                        {"hash" in buy.phase && buy.phase.hash && (
+                          <a
+                            href={explorerTx(buy.phase.hash)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-primary hover:underline font-data-mono"
+                          >
+                            View: {buy.phase.hash.slice(0, 8)}…
+                          </a>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Status message */}
+                    {!buy.isPending && buyStatus && (
+                      <p className="text-xs text-on-surface-variant break-all" role="status">{buyStatus}</p>
+                    )}
                   </div>
                 )}
 
@@ -347,6 +543,14 @@ function MarketQuickViewContent() {
           </div>
         )}
       </AnimatePresence>
+      {reviewModel && (
+        <TxReview
+          model={reviewModel.model}
+          changedFrom={reviewModel.changedFrom}
+          onConfirm={() => closeReview(true)}
+          onCancel={() => closeReview(false)}
+        />
+      )}
     </main>
   );
 }

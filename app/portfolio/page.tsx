@@ -1,9 +1,13 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { motion } from "framer-motion";
 import { usePortfolio, usePositions } from "@/lib/hooks/usePortfolio";
 import { formatUsdc } from "@/lib/stellar/units";
+import { useWallet } from "@/lib/contexts/WalletContext";
+import { useRedeemAll, type PreparedWriteReview } from "@/lib/hooks/useStellar";
+import { shouldSkipTxReview, TxReview, TxReviewPreferenceControl } from "@/components/tx-review";
+import type { ReviewModel } from "@/lib/stellar/tx-decode";
 
 const TerminalLog = () => {
   const [logs, setLogs] = useState([
@@ -152,9 +156,50 @@ const PositionRow = ({ market, category, platform, side, sideColor, entry, prob,
 
 export default function PortfolioPage() {
   const [status, setStatus] = useState<"OPEN" | "CLOSED">("OPEN");
+  const wallet = useWallet();
+  const redeemBatch = useRedeemAll();
+  const [reviewModel, setReviewModel] = useState<{ model: ReviewModel; changedFrom?: ReviewModel } | null>(null);
+  const reviewResolver = useRef<((approved: boolean) => void) | null>(null);
   const { data: summary, isLoading: isSummaryLoading } = usePortfolio();
   const { data: positionsData, isLoading: isPositionsLoading } = usePositions({ status });
   const positions = positionsData?.positions ?? [];
+  const currentRedeemIds = new Set(redeemBatch.discovery?.redeemables.map((item) => item.marketId.toString()) ?? []);
+  const currentRedeemed = redeemBatch.discovery?.redeemables.filter(
+    (item) => redeemBatch.states[item.marketId.toString()]?.s === "redeemed",
+  ) ?? [];
+  const expectedRedeemTotal = redeemBatch.discovery?.redeemables.reduce((total, item) => total + item.expectedPayout, 0n) ?? 0n;
+  const redeemedPayoutTotal = currentRedeemed.reduce(
+    (total, item) => {
+      const state = redeemBatch.states[item.marketId.toString()];
+      return total + (state?.s === "redeemed" ? state.payout : 0n);
+    },
+    0n,
+  );
+  const resumedItems = Object.entries(redeemBatch.states).filter(([id, item]) =>
+    !currentRedeemIds.has(id) && (item.s === "redeemed" || item.s === "failed" || item.s === "skipped"),
+  );
+  const reviewRedeem = useCallback<PreparedWriteReview>(async (_prepared, model, changedFrom, forceReview = false) => {
+    if (!forceReview && shouldSkipTxReview()) return true;
+    return new Promise<boolean>((resolve) => {
+      reviewResolver.current = resolve;
+      setReviewModel({ model, changedFrom });
+    });
+  }, []);
+  const closeReview = useCallback((approved: boolean) => {
+    setReviewModel(null);
+    const resolve = reviewResolver.current;
+    reviewResolver.current = null;
+    resolve?.(approved);
+  }, []);
+
+  useEffect(
+    () => () => {
+      const resolve = reviewResolver.current;
+      reviewResolver.current = null;
+      resolve?.(false);
+    },
+    [],
+  );
 
   return (
     <main className="max-w-container-max-width mx-auto px-gutter py-8">
@@ -220,10 +265,136 @@ export default function PortfolioPage() {
         </div>
       </section>
 
+      <section className="mb-12 rounded-xl border border-outline-variant bg-white p-6 shadow-sm" aria-labelledby="connected-redemptions-title">
+        <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h2 id="connected-redemptions-title" className="font-headline-sm text-headline-sm text-on-surface">
+              Connected wallet redemptions
+            </h2>
+            <p className="mt-1 max-w-2xl text-sm text-on-surface-variant">
+              Scan on-chain positions for resolved markets and redeem them one at a time. Each transaction is signed separately by your wallet.
+            </p>
+            <div className="mt-2">
+              <TxReviewPreferenceControl />
+            </div>
+            {redeemBatch.discovery && (
+              <p className="mt-2 text-xs text-on-surface-variant" role="status">
+                Scanned {redeemBatch.discovery.scannedMarkets.toString()} of {redeemBatch.discovery.totalMarkets.toString()} markets; found{" "}
+                {redeemBatch.discovery.redeemables.length} redeemable position(s).
+                {redeemBatch.discovery.scanLimited ? " The scan limit was reached; newer markets were checked first." : ""}
+              </p>
+            )}
+            {redeemBatch.discovery && redeemBatch.discovery.redeemables.length > 0 && (
+              <p className="mt-1 text-xs text-on-surface-variant">
+                Expected total: {formatUsdc(expectedRedeemTotal, { maxDecimals: 2, grouping: true })} USDC ·
+                {" "}{currentRedeemed.length} of {redeemBatch.discovery.redeemables.length} redeemed
+                {currentRedeemed.length > 0
+                  ? ` (${formatUsdc(redeemedPayoutTotal, { maxDecimals: 2, grouping: true })} USDC received)`
+                  : ""}
+              </p>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void redeemBatch.scan()}
+              disabled={!wallet.isConnected || wallet.isWrongNetwork || redeemBatch.scanning || redeemBatch.running}
+              className="rounded border border-outline-variant px-4 py-2 text-sm font-semibold text-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {redeemBatch.scanning ? "Scanning ledger…" : "Scan wallet"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void redeemBatch.redeemAll(reviewRedeem)}
+              disabled={!wallet.isConnected || wallet.isWrongNetwork || !redeemBatch.discovery?.redeemables.length || redeemBatch.running || redeemBatch.scanning}
+              className="rounded bg-primary px-4 py-2 text-sm font-semibold text-on-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Redeem all
+            </button>
+            {redeemBatch.running ? (
+              <button type="button" onClick={redeemBatch.cancel} className="rounded border border-outline-variant px-4 py-2 text-sm font-semibold">
+                Stop after current
+              </button>
+            ) : Object.values(redeemBatch.states).some((item) => item.s === "failed") ? (
+              <button
+                type="button"
+                onClick={() => void redeemBatch.retryFailed(reviewRedeem)}
+                className="rounded border border-outline-variant px-4 py-2 text-sm font-semibold"
+              >
+                Retry failed
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        {!wallet.isConnected && <p className="mt-4 text-sm text-on-surface-variant">Connect a Stellar wallet to scan your positions.</p>}
+        {wallet.isWrongNetwork && <p className="mt-4 text-sm text-error">Switch your wallet to Stellar Testnet to redeem positions.</p>}
+        {redeemBatch.error && <p className="mt-4 text-sm text-error" role="alert">{redeemBatch.error}</p>}
+
+        {redeemBatch.discovery && redeemBatch.discovery.redeemables.length > 0 && (
+          <ul className="mt-5 divide-y divide-outline-variant rounded border border-outline-variant">
+            {redeemBatch.discovery.redeemables.map((item) => {
+              const id = item.marketId.toString();
+              const itemState = redeemBatch.states[id] ?? { s: "queued" as const };
+              const payout = formatUsdc(item.expectedPayout, { maxDecimals: 2, grouping: true });
+              return (
+                <li key={id} className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="font-semibold text-on-surface">Market #{id} · {item.settlement.toUpperCase()} winner</p>
+                    <p className="text-sm text-on-surface-variant">
+                      Estimated payout: {payout} USDC
+                      {item.archived ? " · archived ledger entry" : ""}
+                    </p>
+                    {itemState.s === "failed" && <p className="mt-1 text-sm text-error">{itemState.error}</p>}
+                    {itemState.s === "redeemed" && <p className="mt-1 text-sm text-secondary">Redeemed · {formatUsdc(itemState.payout, { maxDecimals: 2, grouping: true })} USDC</p>}
+                    {itemState.s === "signing" && <p className="mt-1 text-sm text-primary">Waiting for wallet signature…</p>}
+                    {itemState.s === "submitting" && <p className="mt-1 text-sm text-primary">Submitted to Stellar…</p>}
+                    {itemState.s === "skipped" && <p className="mt-1 text-sm text-on-surface-variant">Skipped</p>}
+                  </div>
+                  {!redeemBatch.running && itemState.s !== "redeemed" && itemState.s !== "skipped" && (
+                    <button
+                      type="button"
+                      onClick={() => redeemBatch.skip(id)}
+                      className="self-start rounded border border-outline-variant px-3 py-1.5 text-xs font-semibold text-on-surface-variant sm:self-center"
+                    >
+                      Skip
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {redeemBatch.discovery && redeemBatch.discovery.redeemables.length === 0 && (
+          <p className="mt-5 text-sm text-on-surface-variant">No resolved positions are ready to redeem.</p>
+        )}
+        {resumedItems.length > 0 && (
+          <div className="mt-5 border-t border-outline-variant pt-4">
+            <h3 className="font-label-caps text-xs font-bold uppercase tracking-wide text-on-surface-variant">
+              Saved batch progress
+            </h3>
+            <ul className="mt-2 space-y-2 text-sm">
+              {resumedItems.map(([id, item]) => (
+                <li key={id} className="flex flex-wrap justify-between gap-2">
+                  <span>Market #{id}</span>
+                  <span className={item.s === "failed" ? "text-error" : item.s === "redeemed" ? "text-secondary" : "text-on-surface-variant"}>
+                    {item.s === "redeemed"
+                      ? `Redeemed · ${formatUsdc(item.payout, { maxDecimals: 2, grouping: true })} USDC`
+                      : item.s === "failed"
+                        ? item.error
+                        : "Skipped"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </section>
+
       {/* Detailed Positions Table */}
       <section className="bg-white border border-outline-variant rounded shadow-sm overflow-hidden mb-12">
         <div className="px-6 py-4 border-b border-outline-variant flex flex-col sm:flex-row justify-between items-start sm:items-center bg-surface-container-low gap-4">
-          <h2 className="font-headline-sm text-headline-sm text-on-surface">{status === 'OPEN' ? 'Open' : 'Resolved'} Positions</h2>
+          <h2 className="font-headline-sm text-headline-sm text-on-surface">Agent {status === 'OPEN' ? 'Open' : 'Resolved'} Positions</h2>
           <div className="flex items-center gap-4">
             <div className="flex bg-surface-container rounded-lg p-1 border border-outline-variant">
               <button 
@@ -369,6 +540,14 @@ export default function PortfolioPage() {
           </div>
         </aside>
       </div>
+      {reviewModel && (
+        <TxReview
+          model={reviewModel.model}
+          changedFrom={reviewModel.changedFrom}
+          onConfirm={() => closeReview(true)}
+          onCancel={() => closeReview(false)}
+        />
+      )}
     </main>
   );
 }

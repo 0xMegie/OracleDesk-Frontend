@@ -26,19 +26,38 @@ export function tryParseUsdc(input: string): bigint | null {
   }
 }
 
+export const XLM_DECIMALS = 7;
+export const XLM_UNIT = 10n ** BigInt(XLM_DECIMALS);
+
+function formatFixed(
+  raw: bigint,
+  decimals: number,
+  opts: { minDecimals?: number; maxDecimals?: number; grouping?: boolean } = {},
+): string {
+  const { minDecimals = 0, maxDecimals = decimals, grouping = false } = opts;
+  const unit = 10n ** BigInt(decimals);
+  const negative = raw < 0n;
+  const abs = negative ? -raw : raw;
+  const whole = (abs / unit).toString();
+  let frac = (abs % unit).toString().padStart(decimals, "0").slice(0, maxDecimals).replace(/0+$/, "");
+  if (frac.length < minDecimals) frac = frac.padEnd(minDecimals, "0");
+  const wholeOut = grouping ? whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",") : whole;
+  return `${negative ? "-" : ""}${wholeOut}${frac ? `.${frac}` : ""}`;
+}
+
 /**
  * Formats base units as a decimal string. Trailing zeros are trimmed unless
  * `minDecimals` asks for some; `maxDecimals` truncates (never rounds up).
  */
 export function formatUsdc(raw: bigint, opts: { minDecimals?: number; maxDecimals?: number; grouping?: boolean } = {}): string {
-  const { minDecimals = 0, maxDecimals = USDC_DECIMALS, grouping = false } = opts;
-  const negative = raw < 0n;
-  const abs = negative ? -raw : raw;
-  const whole = (abs / USDC_UNIT).toString();
-  let frac = (abs % USDC_UNIT).toString().padStart(USDC_DECIMALS, "0").slice(0, maxDecimals).replace(/0+$/, "");
-  if (frac.length < minDecimals) frac = frac.padEnd(minDecimals, "0");
-  const wholeOut = grouping ? whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",") : whole;
-  return `${negative ? "-" : ""}${wholeOut}${frac ? `.${frac}` : ""}`;
+  return formatFixed(raw, USDC_DECIMALS, opts);
+}
+
+/**
+ * Formats stroops as a decimal XLM string with 7 decimal places.
+ */
+export function formatXlm(stroops: bigint, opts: { minDecimals?: number; maxDecimals?: number; grouping?: boolean } = {}): string {
+  return formatFixed(stroops, XLM_DECIMALS, opts);
 }
 
 /** Display-only conversion. Never feed the result back into a transaction. */

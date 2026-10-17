@@ -6,7 +6,7 @@ These steps cover what automated checks can't: a real browser wallet signing rea
 
 ## Before you start: two known blockers
 
-1. **Test USDC can only be minted by the deployer key.** The collateral is a self-issued test asset (`USDC` issued by `GD2NB2VUME7ECMHFHQN5M3KUZLLJF3R6Z4OFCBLE4SJNHIQHITRPQGHQ`, wrapped as the SAC `CA2WQQJ4OHQCLHQW6XN4BCLILGRV6V4YDYDT3GVIWXB53BTOO7EMREQH`). There is no faucet, so step 4 needs a maintainer (see [contract-requests.md](contract-requests.md) #3).
+1. **Test USDC can only be minted by the deployer key.** The collateral is a self-issued test asset wrapped as a Stellar Asset Contract. There is no faucet, so step 4 still needs a maintainer (see [contract-requests.md](contract-requests.md) #3).
 2. **Both existing testnet markets are closed.** Markets 0 and 1 were created by the contracts repo's demo with a 90-second trading window on 2026-09-21; market 0 is resolved YES. Buying on them fails with "This market has closed". Step 7 therefore needs a fresh, open market (see below).
 
 ## You need
@@ -31,9 +31,11 @@ These steps cover what automated checks can't: a real browser wallet signing rea
 
 ## 4. Get test USDC
 
-a. **Add the trustline** (the account must trust the asset before it can hold it):
+a. **Enable the trustline in OracleDesk** (the account must trust the asset before it can hold it):
 
-- [ ] Freighter → Manage assets → Add manually: code `USDC`, issuer `GD2NB2VUME7ECMHFHQN5M3KUZLLJF3R6Z4OFCBLE4SJNHIQHITRPQGHQ`. Approve the transaction.
+- [ ] Connect your funded wallet, then open the wallet menu or an on-chain market's quick view.
+- [ ] Click **Enable USDC** and approve the one-time `changeTrust` transaction. The flow checks spendable XLM for the trustline reserve and transaction fee first.
+- [ ] Wait for the trustline to appear. Enabling it does not submit a pending buy; review the amount and click **Buy** again.
 
 b. **Ask a maintainer to mint.** With the deployer key from `scripts/deploy-testnet.sh` (the CLI identity `oracledesk-deployer`), they run:
 
@@ -96,8 +98,18 @@ To try the same on market 0 (resolved): the buy button is disabled and the panel
 
 - [ ] Wallet menu → Disconnect. The button returns to **Connect Wallet**, and `oracledesk_token` is gone from Local Storage.
 
+## 11. Low XLM and reserve check (fee preview)
+
+- [ ] On testnet, connect with an account that has only ~1.5 XLM and a USDC trustline (or an account unfunded by Friendbot).
+- [ ] Open `http://localhost:3000/markets/quick-view?onChainId=<market_id>`.
+- [ ] Observe the fee preview line under the quote: `Network fee ≈ X XLM · spendable Y XLM` (hover for the inclusion + resource fee breakdown and network base reserve note).
+- [ ] If unfunded: verify the message "Fund this account with XLM first." is displayed and the Buy button is disabled.
+- [ ] If spendable XLM is below the total fee: verify the message "You need about X more XLM to pay the network fee." is displayed and the Buy button is disabled.
+- [ ] Verify the same fee preview, spendable XLM display, and blocking warnings appear on `/copy-trade` (next to slippage text) and `/premium` (in the checkout modal above the pay button).
+
 ## Also worth clicking
 
 - [ ] `/premium` → **Get a daily pass** → **Pay with wallet**. Freighter shows a USDC `transfer` to the treasury (`CBTFA3EP…`) for 0.50 USDC. After approval the backend verifies it on-chain and says the pass is active. Note: until `PAYMENTS_RECIPIENT` is decided, this payment becomes treasury trading capital (see docs/STATUS.md).
 - [ ] `/copy-trade?marketId=<backend market id>&traceId=<trace id>`: the side comes from the trace's edge. With no trace or zero edge the confirm button is disabled and the page explains why.
 - [ ] `/admin` with an address not in `NEXT_PUBLIC_ADMIN_ADDRESSES` shows "Access Denied".
+- [ ] `/tx?hash=<64-hex>` inspects live ledger state and fee charged for any testnet transaction, falling back cleanly to Stellar Expert when outside RPC retention.
