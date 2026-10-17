@@ -8,10 +8,11 @@ import { useQuery } from "@tanstack/react-query";
 import { useMarket } from "@/lib/hooks/useMarkets";
 import { getMarketByOnChainId } from "@/lib/api/markets";
 import { ApiError } from "@/lib/api/client";
-import { useBuy, useOnChainMarket, usePosition, useQuoteBuy, useUsdcBalance } from "@/lib/hooks/useStellar";
+import { useBuy, useOnChainMarket, usePosition, useQuoteBuy, useUsdcBalance, useAccountReserve, usePrepareBuy } from "@/lib/hooks/useStellar";
 import { useWallet } from "@/lib/contexts/WalletContext";
 import { explorerTx } from "@/lib/stellar/config";
-import { formatUsdc, minOut, tryParseUsdc } from "@/lib/stellar/units";
+import { formatUsdc, formatXlm, minOut, tryParseUsdc } from "@/lib/stellar/units";
+import { TxPhase } from "@/lib/stellar/tx-lifecycle";
 
 const SLIPPAGE_BPS = 100; // 1%
 
@@ -47,6 +48,27 @@ export default function MarketQuickViewPage() {
   );
 }
 
+function renderTxPhase(phase: TxPhase): string | null {
+  switch (phase.name) {
+    case "building":
+      return null;
+    case "simulating":
+      return "Simulating transaction…";
+    case "awaiting-signature":
+      return "Waiting for your wallet…";
+    case "submitting":
+      return "Sending to the network…";
+    case "pending":
+      return "Waiting for a ledger…";
+    case "confirmed":
+      return "Transaction confirmed.";
+    case "failed":
+      return phase.error.message;
+    case "expired":
+      return "Transaction expired without confirmation.";
+  }
+}
+
 function MarketQuickViewContent() {
   const searchParams = useSearchParams();
   const marketId = searchParams.get("marketId");
@@ -68,6 +90,7 @@ function MarketQuickViewContent() {
   const { address, isConnected, openModal } = useWallet();
   const position = usePosition(onChainMarketId, address);
   const balance = useUsdcBalance(address);
+  const reserve = useAccountReserve(address);
   const buy = useBuy();
 
   const [showModal] = useState(true);
@@ -77,6 +100,24 @@ function MarketQuickViewContent() {
   const amountRaw = tryParseUsdc(amountInput);
   const debouncedAmount = useDebounced(amountRaw, 400);
   const quote = useQuoteBuy(onChainMarketId, side, debouncedAmount);
+  const prepareBuy = usePrepareBuy({
+    marketId: onChainMarketId,
+    outcome: side,
+    collateralIn: debouncedAmount,
+    slippageBps: SLIPPAGE_BPS,
+    holder: address,
+  });
+
+  const fees = prepareBuy.data?.fees;
+  const isUnfunded = Boolean(reserve.data && !reserve.data.funded);
+  const isInsufficientXlm = Boolean(
+    reserve.data?.funded &&
+    fees &&
+    reserve.data.spendable < fees.totalFee
+  );
+  const xlmDeficit = (reserve.data?.funded && fees && fees.totalFee > reserve.data.spendable)
+    ? fees.totalFee - reserve.data.spendable
+    : null;
 
   // Illustrative only: there is no price history source yet.
   const sparklinePath = "M0 25 L10 22 L20 28 L30 18 L40 20 L50 15 L60 17 L70 10 L80 12 L90 5 L100 8";
@@ -103,9 +144,15 @@ function MarketQuickViewContent() {
       setBuyStatus("Enter an amount like 10 or 2.5.");
       return;
     }
-    setBuyStatus("Getting a fresh quote, then asking your wallet to sign…");
+    setBuyStatus(null);
     try {
-      const result = await buy.mutateAsync({ marketId: onChainMarketId, outcome: side, collateralIn: amountRaw, slippageBps: SLIPPAGE_BPS });
+      const result = await buy.mutateAsync({
+        marketId: onChainMarketId,
+        outcome: side,
+        collateralIn: amountRaw,
+        slippageBps: SLIPPAGE_BPS,
+        prepared: prepareBuy.data,
+      });
       setBuyStatus(
         `Bought ${formatUsdc(result.sharesOut, { maxDecimals: 2 })} ${side.toUpperCase()} shares.` +
           (result.txHash ? ` View: ${explorerTx(result.txHash)}` : ""),
@@ -281,10 +328,23 @@ function MarketQuickViewContent() {
                       <button
                         type="button"
                         onClick={handleBuy}
-                        disabled={buy.isPending || (isConnected && !isOpen)}
+                        disabled={
+                          buy.isPending ||
+                          (isConnected && !isOpen) ||
+                          (isConnected && isUnfunded) ||
+                          (isConnected && isInsufficientXlm)
+                        }
                         className="bg-primary text-primary-foreground px-4 py-2 rounded-lg font-label-caps text-label-caps font-bold disabled:opacity-50"
                       >
-                        {!isConnected ? "Connect" : buy.isPending ? "Buying…" : `Buy ${side.toUpperCase()}`}
+                        {!isConnected
+                          ? "Connect"
+                          : buy.isPending
+                          ? (buy.phase.name === "awaiting-signature" ? "Signing…" : "Buying…")
+                          : isUnfunded
+                          ? "Fund Account"
+                          : isInsufficientXlm
+                          ? "Insufficient XLM"
+                          : `Buy ${side.toUpperCase()}`}
                       </button>
                     </div>
                     <div className="flex justify-between text-[11px] font-data-mono text-on-surface-variant">
@@ -297,6 +357,45 @@ function MarketQuickViewContent() {
                       </span>
                       {balance.data !== undefined && <span>Balance {formatUsdc(balance.data, { maxDecimals: 2, grouping: true })}</span>}
                     </div>
+
+                    {/* Network fee & reserve row */}
+                    {isConnected && (
+                      <div
+                        className="flex justify-between items-center text-[11px] font-data-mono text-on-surface-variant"
+                        title={fees ? `Inclusion: ${formatXlm(fees.inclusionFee)} XLM · Resource: ${formatXlm(fees.resourceFee)} XLM (assumes the network base reserve of 0.5 XLM)` : "assumes the network base reserve of 0.5 XLM"}
+                      >
+                        <span>
+                          Network fee {fees ? `≈ ${formatXlm(fees.totalFee)} XLM` : prepareBuy.isLoading ? "≈ calculating…" : "—"} ·{" "}
+                          {reserve.isLoading
+                            ? "checking XLM…"
+                            : reserve.isError
+                            ? "couldn't check XLM balance"
+                            : reserve.data && !reserve.data.funded
+                            ? "unfunded"
+                            : reserve.data
+                            ? `spendable ${formatXlm(reserve.data.spendable, { maxDecimals: 1 })} XLM`
+                            : "spendable —"}
+                        </span>
+                        {fees && (
+                          <span className="text-[10px] text-outline">
+                            (inclusion {formatXlm(fees.inclusionFee)} + resource {formatXlm(fees.resourceFee)})
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Blocking warnings */}
+                    {isConnected && isUnfunded && (
+                      <p className="text-xs text-error font-medium" role="alert">
+                        Fund this account with XLM first.
+                      </p>
+                    )}
+                    {isConnected && isInsufficientXlm && xlmDeficit !== null && (
+                      <p className="text-xs text-error font-medium" role="alert">
+                        You need about {formatXlm(xlmDeficit)} more XLM to pay the network fee.
+                      </p>
+                    )}
+
                     {!isOpen && view && (
                       <p className="text-[11px] text-on-surface-variant">This market is closed to trading.</p>
                     )}
@@ -306,7 +405,28 @@ function MarketQuickViewContent() {
                         <SourceTag source="chain" />
                       </p>
                     )}
-                    {buyStatus && <p className="text-xs text-on-surface-variant break-all" role="status">{buyStatus}</p>}
+
+                    {/* Observable tx lifecycle phase */}
+                    {buy.isPending && (
+                      <div className="text-xs text-on-surface-variant flex items-center gap-1.5" role="status">
+                        <span>{renderTxPhase(buy.phase) ?? "Processing transaction…"}</span>
+                        {"hash" in buy.phase && buy.phase.hash && (
+                          <a
+                            href={explorerTx(buy.phase.hash)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-primary hover:underline font-data-mono"
+                          >
+                            View: {buy.phase.hash.slice(0, 8)}…
+                          </a>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Status message */}
+                    {!buy.isPending && buyStatus && (
+                      <p className="text-xs text-on-surface-variant break-all" role="status">{buyStatus}</p>
+                    )}
                   </div>
                 )}
 

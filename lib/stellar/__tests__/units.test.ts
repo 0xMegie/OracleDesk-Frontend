@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatUsdc, maxIn, minOut, parseUsdc, shareOf, shortAddress, tryParseUsdc, USDC_UNIT } from "../units";
+import { formatUsdc, formatXlm, maxIn, minOut, parseUsdc, shareOf, shortAddress, tryParseUsdc, USDC_UNIT, XLM_UNIT } from "../units";
 
 describe("parseUsdc / formatUsdc", () => {
   it("uses 7 decimals", () => {
@@ -36,6 +36,19 @@ describe("parseUsdc / formatUsdc", () => {
     expect(formatUsdc(15_000_000n, { minDecimals: 2 })).toBe("1.50");
     expect(formatUsdc(19_999_999n, { maxDecimals: 2 })).toBe("1.99"); // truncates, never rounds up
     expect(formatUsdc(-5n)).toBe("-0.0000005");
+  });
+});
+
+describe("formatXlm", () => {
+  it("uses 7 decimals and stroops unit", () => {
+    expect(XLM_UNIT).toBe(10_000_000n);
+    expect(formatXlm(10_000_000n)).toBe("1");
+    expect(formatXlm(1n)).toBe("0.0000001");
+    expect(formatXlm(123_456n)).toBe("0.0123456");
+    expect(formatXlm(12_345_678_900_000n, { grouping: true })).toBe("1,234,567.89");
+    expect(formatXlm(99_981_000_000n, { grouping: true })).toBe("9,998.1");
+    expect(formatXlm(0n)).toBe("0");
+    expect(formatXlm(5_000_000n, { minDecimals: 2 })).toBe("0.50");
   });
 });
 

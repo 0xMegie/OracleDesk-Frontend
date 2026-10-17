@@ -43,11 +43,29 @@ const FRIENDLY: Record<string, string> = {
   Unauthorized: "Your wallet isn't allowed to do this.",
 };
 
+import type { rpc } from "@stellar/stellar-sdk";
+
 export interface DescribedError {
-  kind: "rejected" | "insufficient-balance" | "no-trustline" | "contract" | "wrong-network" | "disconnected" | "network" | "unknown";
+  kind:
+    | "rejected"
+    | "insufficient-balance"
+    | "insufficient-xlm"
+    | "no-trustline"
+    | "contract"
+    | "wrong-network"
+    | "disconnected"
+    | "network"
+    | "submission"
+    | "expired"
+    | "unknown";
   message: string;
   /** Contract error name, e.g. "SlippageExceeded", when known. */
   code?: string;
+}
+
+export interface TxDescribedError extends DescribedError {
+  submission?: "try-again-later" | "duplicate" | "rejected-by-network" | "failed-on-chain" | "not-found-after-timeout";
+  resultCode?: string; // e.g. "txBadSeq", "txInsufficientFee", "txFailed"
 }
 
 function textOf(err: unknown): string {
@@ -86,6 +104,9 @@ export function describeError(err: unknown, contract: ContractName = "marketCore
   if (/balance is not sufficient|resulting balance is not within the allowed range|insufficient (balance|funds)|BalanceError|op_underfunded/i.test(text)) {
     return { kind: "insufficient-balance", message: "You don't have enough USDC for this." };
   }
+  if (/op_low_reserve|txInsufficientBalance|tx_insufficient_balance/i.test(text)) {
+    return { kind: "insufficient-xlm", message: "You don't have enough spendable XLM to pay the network fee." };
+  }
   if (/wrong network|network mismatch/i.test(text)) {
     return { kind: "wrong-network", message: "Switch your wallet to Stellar Testnet and try again." };
   }
@@ -104,6 +125,104 @@ export function describeError(err: unknown, contract: ContractName = "marketCore
     return { kind: "network", message: "Couldn't reach the Stellar network. Check your connection and try again." };
   }
   return { kind: "unknown", message: "Something went wrong. Please try again." };
+}
+
+/**
+ * Maps an rpc.Api.SendTransactionResponse to a TxDescribedError.
+ */
+export function describeSubmission(
+  response: rpc.Api.SendTransactionResponse,
+  contract: ContractName = "marketCore",
+): TxDescribedError {
+  if (response.status === "TRY_AGAIN_LATER") {
+    return {
+      kind: "submission",
+      submission: "try-again-later",
+      message: "The network is busy. Please try again in a moment.",
+    };
+  }
+  if (response.status === "DUPLICATE") {
+    return {
+      kind: "submission",
+      submission: "duplicate",
+      message: "This transaction is already in flight.",
+    };
+  }
+
+  // ERROR case
+  let resultCode: string | undefined;
+  try {
+    resultCode = response.errorResult?.result().switch().name;
+  } catch {
+    // ignore
+  }
+
+  if (resultCode === "txBadSeq") {
+    return {
+      kind: "submission",
+      submission: "rejected-by-network",
+      resultCode,
+      message: "Transaction sequence number is invalid. Please try again.",
+    };
+  }
+  if (resultCode === "txInsufficientFee") {
+    return {
+      kind: "submission",
+      submission: "rejected-by-network",
+      resultCode,
+      message: "The network fee bid was too low. Please try again with a higher fee.",
+    };
+  }
+  if (resultCode === "txTooLate") {
+    return {
+      kind: "submission",
+      submission: "rejected-by-network",
+      resultCode,
+      message: "The transaction expired before reaching the ledger. Please try again.",
+    };
+  }
+  if (resultCode === "txInsufficientBalance") {
+    return {
+      kind: "insufficient-xlm",
+      submission: "rejected-by-network",
+      resultCode,
+      message: "You don't have enough spendable XLM to pay the network fee.",
+    };
+  }
+
+  // For txFailed on an InvokeHostFunction, fall through to describeError with the contract name
+  // so Error(Contract, #N) still maps via TABLES.
+  const diagText = response.diagnosticEvents
+    ? response.diagnosticEvents
+        .map((e) => {
+          try {
+            return typeof (e as unknown as { toXDR?: (f: string) => string }).toXDR === "function"
+              ? (e as unknown as { toXDR: (format: string) => string }).toXDR("base64")
+              : String(e);
+          } catch {
+            return String(e);
+          }
+        })
+        .join(" ")
+    : "";
+  const fullText = `${textOf(response)} ${diagText}`;
+  const described = describeError(fullText, contract);
+  if (described.kind !== "unknown") {
+    return {
+      ...described,
+      submission: "rejected-by-network",
+      resultCode: resultCode ?? "txFailed",
+    };
+  }
+
+  return {
+    kind: "submission",
+    submission: "rejected-by-network",
+    resultCode: resultCode ?? "txFailed",
+    message: resultCode
+      ? `Transaction was rejected by the network (${resultCode}).`
+      : "Transaction was rejected by the network. Please try again.",
+  };
 }
 
 /** Thrown by write hooks so callers get a readable message in `error.message`. */
