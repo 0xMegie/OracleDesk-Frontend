@@ -1,4 +1,5 @@
 import { Address, xdr } from '@stellar/stellar-sdk';
+import type { AssembledTransaction } from '@stellar/stellar-sdk/contract';
 
 export interface AuthorizationInspection { count: number; signers: string[]; functions: string[]; warnings: string[]; valid: boolean; }
 
@@ -16,4 +17,12 @@ export function inspectAuthorizationEntries(entries: readonly xdr.SorobanAuthori
     } catch { warnings.push('Unable to decode an authorization entry'); }
   }
   return { count: entries.length, signers, functions, warnings, valid: warnings.length === 0 };
+}
+
+/** Decode the authorization entries returned by Soroban simulation. */
+export function inspectTransactionAuthorization<T>(tx: AssembledTransaction<T>, expectedAddress?: string): AuthorizationInspection {
+  const entries = tx.simulation && "auth" in tx.simulation
+    ? (tx.simulation.auth as readonly xdr.SorobanAuthorizationEntry[])
+    : [];
+  return inspectAuthorizationEntries(entries, expectedAddress);
 }

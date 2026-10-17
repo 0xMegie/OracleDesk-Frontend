@@ -9,6 +9,7 @@ import { collateralOutForShares, priceYesBps } from "@/lib/stellar/generated/fpm
 import type { Market as OnChainMarket, Position } from "@/lib/stellar/generated/market-core";
 import { fetchAndVerifyTrace, type TraceCheck } from "@/lib/stellar/trace";
 import { maxIn, minOut } from "@/lib/stellar/units";
+import { inspectTransactionAuthorization } from "@/lib/stellar/authorization";
 
 /** Query keys all start with "stellar" so a disconnect can drop them in one go. */
 export const stellarKeys = {
@@ -46,6 +47,10 @@ export function simulated<T>(tx: AssembledTransaction<unknown>, contract: Contra
 async function send<T>(tx: AssembledTransaction<unknown>, contract: ContractName = "marketCore"): Promise<{ value: T; txHash: string | null }> {
   // Surface simulation failures before asking the wallet to sign.
   simulated<T>(tx, contract);
+  const authorization = inspectTransactionAuthorization(tx);
+  if (!authorization.valid) {
+    throw new UserFacingError({ kind: "contract", message: "The wallet authorization does not match this transaction." });
+  }
   try {
     const sent = await tx.signAndSend();
     const value = sent.result as unknown;
