@@ -4,13 +4,32 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 
 import { useWallet } from "@/lib/contexts/WalletContext";
-import { useUsdcTransfer } from "@/lib/hooks/useStellar";
+import { useUsdcTransfer, useAccountReserve, usePrepareUsdcTransfer } from "@/lib/hooks/useStellar";
 import { useUnlockTrace } from "@/lib/hooks/useTraces";
 import { PAYMENTS_RECIPIENT, explorerTx } from "@/lib/stellar/config";
-import { formatUsdc, parseUsdc } from "@/lib/stellar/units";
-import { shouldSkipTxReview, TxReview, TxReviewPreferenceControl } from "@/components/tx-review";
-import { useSubmitQueueState } from "@/lib/stellar/submit-queue";
-import type { ReviewModel } from "@/lib/stellar/tx-decode";
+import { formatUsdc, formatXlm, parseUsdc } from "@/lib/stellar/units";
+import { TxPhase } from "@/lib/stellar/tx-lifecycle";
+
+function renderTxPhase(phase: TxPhase): string | null {
+  switch (phase.name) {
+    case "building":
+      return null;
+    case "simulating":
+      return "Simulating transaction…";
+    case "awaiting-signature":
+      return "Waiting for your wallet…";
+    case "submitting":
+      return "Sending to the network…";
+    case "pending":
+      return "Waiting for a ledger…";
+    case "confirmed":
+      return "Transaction confirmed.";
+    case "failed":
+      return phase.error.message;
+    case "expired":
+      return "Transaction expired without confirmation.";
+  }
+}
 
 /**
  * Price of the backend's daily pass (its DAILY_PASS_PRICE_RAW). The backend
@@ -91,7 +110,7 @@ export default function PremiumPage() {
   const { address, isConnected, isWrongNetwork, openModal, ensureSession } = useWallet();
   const transfer = useUsdcTransfer();
   const unlock = useUnlockTrace();
-  const submitQueue = useSubmitQueueState(address);
+  const reserve = useAccountReserve(address);
 
   const [selectedTier, setSelectedTier] = useState<Tier | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<"usdc" | "card">("usdc");
@@ -126,6 +145,23 @@ export default function PremiumPage() {
     [],
   );
 
+  const prepareTransfer = usePrepareUsdcTransfer({
+    to: PAYMENTS_RECIPIENT,
+    amount: selectedTier?.priceRaw ?? null,
+    holder: address,
+  });
+
+  const fees = prepareTransfer.data?.fees;
+  const isUnfunded = Boolean(reserve.data && !reserve.data.funded);
+  const isInsufficientXlm = Boolean(
+    reserve.data?.funded &&
+    fees &&
+    reserve.data.spendable < fees.totalFee
+  );
+  const xlmDeficit = (reserve.data?.funded && fees && fees.totalFee > reserve.data.spendable)
+    ? fees.totalFee - reserve.data.spendable
+    : null;
+
   const openCheckout = (tier: Tier) => {
     if (!tier.priceRaw) return;
     if (!isConnected) {
@@ -156,11 +192,16 @@ export default function PremiumPage() {
         return;
       }
 
-      setStatusMessage(`Review the ${formatUsdc(selectedTier.priceRaw)} USDC transfer before signing…`);
+      setStatusMessage(null);
       const { txHash } = await transfer.mutateAsync({
         to: PAYMENTS_RECIPIENT,
         amount: selectedTier.priceRaw,
-        review: reviewPreparedTransfer,
+        prepared: prepareTransfer.data,
+        followUp: {
+          type: "unlock-daily-pass",
+          traceId: DAILY_PASS_TRACE_PLACEHOLDER,
+          amountRaw: selectedTier.priceRaw.toString(),
+        },
       });
 
       setStatusMessage("Payment sent. Waiting for OracleDesk to verify it on-chain…");
@@ -402,16 +443,61 @@ export default function PremiumPage() {
                 </div>
 
                 <div className="mt-8 space-y-4">
-                  <div className="flex justify-between font-body-md text-on-surface-variant">
+                  <div
+                    className="flex justify-between font-body-md text-on-surface-variant text-sm"
+                    title={fees ? `Inclusion: ${formatXlm(fees.inclusionFee)} XLM · Resource: ${formatXlm(fees.resourceFee)} XLM (assumes the network base reserve of 0.5 XLM)` : "assumes the network base reserve of 0.5 XLM"}
+                  >
                     <span>Network fee</span>
-                    <span className="font-data-mono">Paid in XLM by your wallet</span>
+                    <span className="font-data-mono text-xs">
+                      {fees ? `≈ ${formatXlm(fees.totalFee)} XLM` : prepareTransfer.isLoading ? "calculating…" : "Paid in XLM"} ·{" "}
+                      {reserve.isLoading
+                        ? "checking…"
+                        : reserve.isError
+                        ? "couldn't check XLM balance"
+                        : reserve.data && !reserve.data.funded
+                        ? "unfunded"
+                        : reserve.data
+                        ? `spendable ${formatXlm(reserve.data.spendable, { maxDecimals: 1 })} XLM`
+                        : "spendable —"}
+                    </span>
                   </div>
+
+                  {/* Blocking warnings */}
+                  {isConnected && isUnfunded && (
+                    <p className="text-xs text-error font-medium" role="alert">
+                      Fund this account with XLM first.
+                    </p>
+                  )}
+                  {isConnected && isInsufficientXlm && xlmDeficit !== null && (
+                    <p className="text-xs text-error font-medium" role="alert">
+                      You need about {formatXlm(xlmDeficit)} more XLM to pay the network fee.
+                    </p>
+                  )}
+
                   <div className="flex justify-between font-headline-sm text-headline-sm pt-4 border-t border-outline-variant">
                     <span>Total Due</span>
                     <span className="text-primary">{selectedTier.priceStr}</span>
                   </div>
-                  
-                  {statusMessage && (
+
+                  {/* Live Tx phase */}
+                  {transfer.isPending && (
+                    <div className="p-3 bg-primary-container/10 border border-primary/20 rounded text-primary text-xs font-bold flex items-center justify-between" role="status">
+                      <span>{renderTxPhase(transfer.phase) ?? statusMessage ?? "Processing payment…"}</span>
+                      {"hash" in transfer.phase && transfer.phase.hash && (
+                        <a
+                          href={explorerTx(transfer.phase.hash)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="underline font-data-mono"
+                        >
+                          View: {transfer.phase.hash.slice(0, 8)}…
+                        </a>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Final or error status */}
+                  {!transfer.isPending && statusMessage && (
                     <div className="p-3 bg-primary-container/10 border border-primary/20 rounded text-primary text-xs font-bold break-all" role="status">
                       {waitingForTransfer ? "Waiting for your previous transaction to finish…" : statusMessage}
                     </div>
@@ -420,9 +506,20 @@ export default function PremiumPage() {
                   <button 
                     className="w-full py-4 bg-primary text-on-primary font-headline-sm text-headline-sm rounded-xl mt-4 hover:shadow-lg active:scale-[0.98] transition-all cursor-pointer disabled:opacity-50"
                     onClick={handlePayment}
-                    disabled={isSubmitting}
+                    disabled={
+                      isSubmitting ||
+                      transfer.isPending ||
+                      (isConnected && isUnfunded) ||
+                      (isConnected && isInsufficientXlm)
+                    }
                   >
-                    {waitingForTransfer ? "Waiting…" : isSubmitting ? "Processing..." : paymentMethod === 'usdc' ? "Pay with Wallet" : "Proceed to Payment"}
+                    {isSubmitting || transfer.isPending
+                      ? (transfer.phase.name === "awaiting-signature" ? "Signing…" : "Processing...")
+                      : isUnfunded
+                      ? "Fund Account"
+                      : isInsufficientXlm
+                      ? "Insufficient XLM"
+                      : paymentMethod === 'usdc' ? "Pay with Wallet" : "Proceed to Payment"}
                   </button>
                   <p className="text-center text-[10px] text-on-surface-variant uppercase tracking-widest mt-4">
                     Verified on-chain by OracleDesk before access is granted

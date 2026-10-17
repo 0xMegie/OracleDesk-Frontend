@@ -7,15 +7,34 @@ import { getTrace, ReasoningTrace } from "@/lib/api/traces";
 import { confirmCopyTrade, initiateCopyTrade } from "@/lib/api/trade";
 import { ApiError } from "@/lib/api/client";
 import { useMarket } from "@/lib/hooks/useMarkets";
-import { useBuy, useQuoteBuy, useUsdcBalance, type PreparedWriteReview } from "@/lib/hooks/useStellar";
+import { useBuy, useQuoteBuy, useUsdcBalance, useAccountReserve, usePrepareBuy } from "@/lib/hooks/useStellar";
 import { explorerTx } from "@/lib/stellar/config";
-import { formatUsdc, minOut, shareOf } from "@/lib/stellar/units";
-import { useSubmitQueueState } from "@/lib/stellar/submit-queue";
-import { shouldSkipTxReview, TxReview, TxReviewPreferenceControl } from "@/components/tx-review";
-import type { ReviewModel } from "@/lib/stellar/tx-decode";
+import { formatUsdc, formatXlm, minOut, shareOf } from "@/lib/stellar/units";
+import { TxPhase } from "@/lib/stellar/tx-lifecycle";
 
 /** Wait this long after the slider stops before asking for a new quote. */
 const QUOTE_DEBOUNCE_MS = 400;
+
+function renderTxPhase(phase: TxPhase): string | null {
+  switch (phase.name) {
+    case "building":
+      return null;
+    case "simulating":
+      return "Simulating transaction…";
+    case "awaiting-signature":
+      return "Waiting for your wallet…";
+    case "submitting":
+      return "Sending to the network…";
+    case "pending":
+      return "Waiting for a ledger…";
+    case "confirmed":
+      return "Transaction confirmed.";
+    case "failed":
+      return phase.error.message;
+    case "expired":
+      return "Transaction expired without confirmation.";
+  }
+}
 
 function useDebounced<T>(value: T, ms: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -40,6 +59,7 @@ function CopyTradeContent() {
   const onChainMarketId = market?.onChainMarketId ?? null;
 
   const balance = useUsdcBalance(address);
+  const reserve = useAccountReserve(address);
   const buy = useBuy();
   const submitQueue = useSubmitQueueState(address);
 
@@ -94,6 +114,24 @@ function CopyTradeContent() {
   const debouncedAmount = useDebounced(amountRaw, QUOTE_DEBOUNCE_MS);
   const quote = useQuoteBuy(onChainMarketId, side ?? "Yes", side ? debouncedAmount : null);
   const minShares = quote.data !== undefined ? minOut(quote.data, slippageBps) : null;
+  const prepareBuy = usePrepareBuy({
+    marketId: onChainMarketId,
+    outcome: side ?? "Yes",
+    collateralIn: side ? debouncedAmount : null,
+    slippageBps,
+    holder: address,
+  });
+
+  const fees = prepareBuy.data?.fees;
+  const isUnfunded = Boolean(reserve.data && !reserve.data.funded);
+  const isInsufficientXlm = Boolean(
+    reserve.data?.funded &&
+    fees &&
+    reserve.data.spendable < fees.totalFee
+  );
+  const xlmDeficit = (reserve.data?.funded && fees && fees.totalFee > reserve.data.spendable)
+    ? fees.totalFee - reserve.data.spendable
+    : null;
 
   const handleSliderInteraction = (clientX: number) => {
     if (!sliderRef.current) return;
@@ -166,17 +204,13 @@ function CopyTradeContent() {
         amountRaw: amountRaw.toString(),
       });
 
-      setStatusMessage(waitingForBuy ? "Waiting for your previous transaction to finish…" : "Getting a fresh quote, then asking your wallet to sign…");
+      setStatusMessage(null);
       const result = await buy.mutateAsync({
         marketId: onChainMarketId,
         outcome: side,
         collateralIn: amountRaw,
         slippageBps,
-        review: reviewPreparedBuy,
-        confirmBoundsChanged: async (previous, next) =>
-          window.confirm(
-            `The quote changed during retry. The minimum shares decreased from ${formatUsdc(previous, { maxDecimals: 2 })} to ${formatUsdc(next, { maxDecimals: 2 })}. Continue?`,
-          ),
+        prepared: prepareBuy.data,
       });
 
       if (result.txHash) await confirmCopyTrade(copyTradeId, result.txHash).catch(() => undefined);
@@ -348,7 +382,26 @@ function CopyTradeContent() {
                   {quote.data !== undefined && minShares !== null ? (
                     <>
                       <span className="text-on-surface font-bold">{formatUsdc(quote.data, { maxDecimals: 2 })}</span>
-                      <span className="block text-[10px] text-on-surface-variant">at least {formatUsdc(minShares, { maxDecimals: 2 })} after slippage</span>
+                      <span className="block text-[10px] text-on-surface-variant">
+                        at least {formatUsdc(minShares, { maxDecimals: 2 })} after slippage
+                        {fees && (
+                          <span
+                            className="block text-[10px] text-on-surface-variant mt-1"
+                            title={`Inclusion: ${formatXlm(fees.inclusionFee)} XLM · Resource: ${formatXlm(fees.resourceFee)} XLM (assumes the network base reserve of 0.5 XLM)`}
+                          >
+                            Network fee ≈ {formatXlm(fees.totalFee)} XLM ·{" "}
+                            {reserve.isLoading
+                              ? "checking XLM…"
+                              : reserve.isError
+                              ? "couldn't check XLM balance"
+                              : reserve.data && !reserve.data.funded
+                              ? "unfunded"
+                              : reserve.data
+                              ? `spendable ${formatXlm(reserve.data.spendable, { maxDecimals: 1 })} XLM`
+                              : "spendable —"}
+                          </span>
+                        )}
+                      </span>
                     </>
                   ) : quote.isFetching ? (
                     <span className="text-on-surface-variant">Quoting…</span>
@@ -362,11 +415,41 @@ function CopyTradeContent() {
             </div>
 
             <div className="space-y-3">
-              {statusMessage ? (
+              {/* Blocking warnings */}
+              {isConnected && isUnfunded && (
+                <div className="rounded-2xl border border-error/20 bg-error-container/10 p-3 text-xs text-error font-medium" role="alert">
+                  Fund this account with XLM first.
+                </div>
+              )}
+              {isConnected && isInsufficientXlm && xlmDeficit !== null && (
+                <div className="rounded-2xl border border-error/20 bg-error-container/10 p-3 text-xs text-error font-medium" role="alert">
+                  You need about {formatXlm(xlmDeficit)} more XLM to pay the network fee.
+                </div>
+              )}
+
+              {/* Tx phase tracking */}
+              {buy.isPending && (
+                <div className="rounded-2xl border border-outline-variant bg-surface p-4 text-sm text-on-surface-variant flex items-center justify-between" role="status">
+                  <span>{renderTxPhase(buy.phase) ?? statusMessage ?? "Processing copy trade…"}</span>
+                  {"hash" in buy.phase && buy.phase.hash && (
+                    <a
+                      href={explorerTx(buy.phase.hash)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-primary hover:underline font-data-mono text-xs"
+                    >
+                      View: {buy.phase.hash.slice(0, 8)}…
+                    </a>
+                  )}
+                </div>
+              )}
+
+              {/* Status message when not pending */}
+              {!buy.isPending && statusMessage && (
                 <div className="rounded-2xl border border-outline-variant bg-surface p-4 text-sm text-on-surface-variant">
                   {waitingForBuy ? "Waiting for your previous transaction to finish…" : statusMessage}
                 </div>
-              ) : null}
+              )}
               <div className="flex gap-3">
                 <button
                   className="flex-1 border border-outline text-on-surface py-4 rounded-lg font-headline-sm text-headline-sm hover:bg-surface-variant transition-all"
@@ -379,10 +462,22 @@ function CopyTradeContent() {
                   className="flex-[2] bg-[#005f73] text-primary-foreground py-4 rounded-lg font-headline-sm text-headline-sm shadow-lg shadow-primary-container/20 hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                   onClick={handleConfirm}
                   type="button"
-                  disabled={isSubmitting || !side}
+                  disabled={
+                    isSubmitting ||
+                    buy.isPending ||
+                    !side ||
+                    (isConnected && isUnfunded) ||
+                    (isConnected && isInsufficientXlm)
+                  }
                 >
                   <span className="material-symbols-outlined text-xl">bolt</span>
-                  {waitingForBuy ? "Waiting…" : isSubmitting ? "Submitting..." : "Confirm Copy Trade"}
+                  {isSubmitting || buy.isPending
+                    ? (buy.phase.name === "awaiting-signature" ? "Signing…" : "Submitting…")
+                    : isUnfunded
+                    ? "Fund Account"
+                    : isInsufficientXlm
+                    ? "Insufficient XLM"
+                    : "Confirm Copy Trade"}
                 </button>
               </div>
               <p className="text-center font-body-md text-body-md text-on-surface-variant text-xs">
