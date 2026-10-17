@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { describeError } from "../errors";
+import { xdr, type rpc } from "@stellar/stellar-sdk";
+import { describeError, describeSubmission } from "../errors";
 
 describe("describeError", () => {
   it("maps market-core contract errors by code", () => {
@@ -28,8 +29,89 @@ describe("describeError", () => {
     expect(describeError("Error(Contract, #13) ... trustline entry is missing for account").kind).toBe("no-trustline");
   });
 
+  it("maps op_low_reserve and txInsufficientBalance to insufficient-xlm while preserving USDC balance mapping", () => {
+    expect(describeError("op_low_reserve").kind).toBe("insufficient-xlm");
+    expect(describeError("txInsufficientBalance").kind).toBe("insufficient-xlm");
+    expect(describeError("tx_insufficient_balance").kind).toBe("insufficient-xlm");
+    // USDC balance still wins
+    expect(describeError("balance is not sufficient to spend").kind).toBe("insufficient-balance");
+    expect(describeError("insufficient balance").kind).toBe("insufficient-balance");
+    expect(describeError("op_underfunded").kind).toBe("insufficient-balance");
+  });
+
   it("falls back to a readable message", () => {
     expect(describeError(new TypeError("Failed to fetch")).kind).toBe("network");
     expect(describeError(42).message).toMatch(/something went wrong/i);
+  });
+});
+
+describe("describeSubmission", () => {
+  it("maps TRY_AGAIN_LATER and DUPLICATE", () => {
+    const tryAgain = describeSubmission({
+      status: "TRY_AGAIN_LATER",
+      hash: "1234",
+      latestLedger: 10,
+      latestLedgerCloseTime: 100,
+    } as rpc.Api.SendTransactionResponse);
+    expect(tryAgain.kind).toBe("submission");
+    expect(tryAgain.submission).toBe("try-again-later");
+
+    const dup = describeSubmission({
+      status: "DUPLICATE",
+      hash: "1234",
+      latestLedger: 10,
+      latestLedgerCloseTime: 100,
+    } as rpc.Api.SendTransactionResponse);
+    expect(dup.kind).toBe("submission");
+    expect(dup.submission).toBe("duplicate");
+  });
+
+  it("maps ERROR result codes txBadSeq, txInsufficientFee, txTooLate, txInsufficientBalance", () => {
+    const makeError = (resultArm: () => xdr.TransactionResultResult) =>
+      ({
+        status: "ERROR",
+        hash: "1234",
+        latestLedger: 10,
+        latestLedgerCloseTime: 100,
+        errorResult: new xdr.TransactionResult({
+          feeCharged: xdr.Int64.fromString("100"),
+          result: resultArm(),
+          ext: new xdr.TransactionResultExt(0),
+        }),
+      }) as unknown as rpc.Api.SendTransactionResponse;
+
+    const badSeq = describeSubmission(makeError(() => xdr.TransactionResultResult.txBadSeq()));
+    expect(badSeq.resultCode).toBe("txBadSeq");
+    expect(badSeq.submission).toBe("rejected-by-network");
+
+    const lowFee = describeSubmission(makeError(() => xdr.TransactionResultResult.txInsufficientFee()));
+    expect(lowFee.resultCode).toBe("txInsufficientFee");
+
+    const tooLate = describeSubmission(makeError(() => xdr.TransactionResultResult.txTooLate()));
+    expect(tooLate.resultCode).toBe("txTooLate");
+
+    const noXlm = describeSubmission(makeError(() => xdr.TransactionResultResult.txInsufficientBalance()));
+    expect(noXlm.kind).toBe("insufficient-xlm");
+    expect(noXlm.resultCode).toBe("txInsufficientBalance");
+  });
+
+  it("falls through to contract errors on txFailed", () => {
+    const failedContract = {
+      status: "ERROR",
+      hash: "1234",
+      latestLedger: 10,
+      latestLedgerCloseTime: 100,
+      errorResult: new xdr.TransactionResult({
+        feeCharged: xdr.Int64.fromString("100"),
+        result: xdr.TransactionResultResult.txFailed([]),
+        ext: new xdr.TransactionResultExt(0),
+      }),
+      message: "HostError: Error(Contract, #12)",
+    } as unknown as rpc.Api.SendTransactionResponse;
+
+    const result = describeSubmission(failedContract, "marketCore");
+    expect(result.code).toBe("SlippageExceeded");
+    expect(result.resultCode).toBe("txFailed");
+    expect(result.submission).toBe("rejected-by-network");
   });
 });

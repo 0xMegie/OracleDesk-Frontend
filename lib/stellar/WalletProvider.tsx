@@ -7,6 +7,7 @@ import { clearAuthSession, getStoredSessionWallet, signInWithWallet } from "@/li
 import { NETWORK_PASSPHRASE } from "./config";
 import { describeError } from "./errors";
 import type { Signer } from "./clients";
+import { TransactionTrackerProvider } from "./tx-tracker";
 
 type Kit = typeof import("@creit.tech/stellar-wallets-kit").StellarWalletsKit;
 
@@ -204,7 +205,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <WalletContext.Provider value={value}>{children}</WalletContext.Provider>
+      <WalletContext.Provider value={value}>
+        <TransactionTrackerProvider>{children}</TransactionTrackerProvider>
+      </WalletContext.Provider>
     </QueryClientProvider>
   );
 }

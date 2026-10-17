@@ -96,8 +96,18 @@ To try the same on market 0 (resolved): the buy button is disabled and the panel
 
 - [ ] Wallet menu → Disconnect. The button returns to **Connect Wallet**, and `oracledesk_token` is gone from Local Storage.
 
+## 11. Low XLM and reserve check (fee preview)
+
+- [ ] On testnet, connect with an account that has only ~1.5 XLM and a USDC trustline (or an account unfunded by Friendbot).
+- [ ] Open `http://localhost:3000/markets/quick-view?onChainId=<market_id>`.
+- [ ] Observe the fee preview line under the quote: `Network fee ≈ X XLM · spendable Y XLM` (hover for the inclusion + resource fee breakdown and network base reserve note).
+- [ ] If unfunded: verify the message "Fund this account with XLM first." is displayed and the Buy button is disabled.
+- [ ] If spendable XLM is below the total fee: verify the message "You need about X more XLM to pay the network fee." is displayed and the Buy button is disabled.
+- [ ] Verify the same fee preview, spendable XLM display, and blocking warnings appear on `/copy-trade` (next to slippage text) and `/premium` (in the checkout modal above the pay button).
+
 ## Also worth clicking
 
 - [ ] `/premium` → **Get a daily pass** → **Pay with wallet**. Freighter shows a USDC `transfer` to the treasury (`CBTFA3EP…`) for 0.50 USDC. After approval the backend verifies it on-chain and says the pass is active. Note: until `PAYMENTS_RECIPIENT` is decided, this payment becomes treasury trading capital (see docs/STATUS.md).
 - [ ] `/copy-trade?marketId=<backend market id>&traceId=<trace id>`: the side comes from the trace's edge. With no trace or zero edge the confirm button is disabled and the page explains why.
 - [ ] `/admin` with an address not in `NEXT_PUBLIC_ADMIN_ADDRESSES` shows "Access Denied".
+- [ ] `/tx?hash=<64-hex>` inspects live ledger state and fee charged for any testnet transaction, falling back cleanly to Stellar Expert when outside RPC retention.
