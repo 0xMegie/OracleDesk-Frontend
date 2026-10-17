@@ -15,14 +15,10 @@ import { describe, expect, it } from "vitest";
 import { fetchOnChainMarket } from "@/lib/hooks/useStellar";
 import { marketCore, reasoningRegistry, Outcomes } from "@/lib/stellar/clients";
 import { fetchAndVerifyTrace, verifyTraceHash } from "@/lib/stellar/trace";
+import { read, bytesToHex } from "@/lib/stellar/typed-call";
 
 const API_URL = process.env.API_URL ?? "http://localhost:8000/api/v1";
 const MARKET_ID = process.env.MARKET_ID ?? "1";
-
-const simulatedValue = <T,>(tx: { result: unknown }): T => {
-  const r = tx.result as { unwrap?: () => T };
-  return (typeof r?.unwrap === "function" ? r.unwrap() : r) as T;
-};
 
 describe("Phase D: backend + testnet", () => {
   it("1. backend markets join to on-chain data", async () => {
@@ -41,7 +37,7 @@ describe("Phase D: backend + testnet", () => {
 
   it("2. on-chain price matches market_core.get_price from the CLI", async () => {
     const view = await fetchOnChainMarket(MARKET_ID);
-    const getPrice = simulatedValue<number>(await marketCore().get_price({ market_id: BigInt(MARKET_ID), outcome: Outcomes.Yes }));
+    const getPrice = read(await marketCore().get_price({ market_id: BigInt(MARKET_ID), outcome: Outcomes.Yes }));
     console.log(`market #${MARKET_ID}: fpmm yesBps=${view.yesBps}, binding get_price=${getPrice}, CLI get_price=${process.env.EXPECTED_YES_BPS ?? "(not given)"}`);
     expect(view.yesBps).toBe(getPrice);
     if (process.env.EXPECTED_YES_BPS) expect(view.yesBps).toBe(Number(process.env.EXPECTED_YES_BPS));
@@ -49,10 +45,11 @@ describe("Phase D: backend + testnet", () => {
 
   it.runIf(Boolean(process.env.DEMO_TRACE_FILE))("4. a demo.sh trace verifies, a tampered copy does not", async () => {
     const traceId = BigInt(process.env.DEMO_TRACE_ID ?? "1");
-    const trace = simulatedValue<{ trace_hash: Uint8Array; ipfs_cid: string }>(
+    const trace = read(
       await reasoningRegistry().get_trace({ trace_id: traceId }),
+      "reasoningRegistry",
     );
-    const onChainHash = Array.from(trace.trace_hash, (b) => b.toString(16).padStart(2, "0")).join("");
+    const onChainHash = bytesToHex(trace.trace_hash);
     const bytes = new Uint8Array(readFileSync(process.env.DEMO_TRACE_FILE as string));
     const tampered = new TextEncoder().encode(new TextDecoder().decode(bytes).replace("demo run", "demo rum"));
 

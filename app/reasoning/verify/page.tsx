@@ -8,7 +8,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { getTrace } from "@/lib/api/traces";
 import { CONTRACTS, explorerAccount } from "@/lib/stellar/config";
 import { reasoningRegistry } from "@/lib/stellar/clients";
-import { simulated } from "@/lib/hooks/useStellar";
+import { read, bytesToHex } from "@/lib/stellar/typed-call";
 import { fetchAndVerifyTrace, ipfsUrl, type TraceCheck } from "@/lib/stellar/trace";
 
 interface VerificationResult {
@@ -79,11 +79,11 @@ function VerifyTraceContent() {
 
       // 2. Read the commitment from reasoning-registry.
       log(`>> [CHAIN] reasoning_registry.get_trace(${onChainTraceId}) on ${CONTRACTS.reasoningRegistry.slice(0, 8)}…`, 30);
-      const onChain = simulated<{ trace_hash: Uint8Array; ipfs_cid: string; market_id: bigint }>(
+      const onChain = read(
         await reasoningRegistry().get_trace({ trace_id: BigInt(onChainTraceId as string) }),
         "reasoningRegistry",
       );
-      const storedHash = Array.from(onChain.trace_hash, (b) => b.toString(16).padStart(2, "0")).join("");
+      const storedHash = bytesToHex(onChain.trace_hash);
       log(`>> [CHAIN] On-chain hash: ${storedHash}`, 50);
       log(`>> [IPFS] Fetching ${onChain.ipfs_cid}`, 60);
 

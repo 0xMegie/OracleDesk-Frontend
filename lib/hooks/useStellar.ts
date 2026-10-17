@@ -1,14 +1,16 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { AssembledTransaction } from "@stellar/stellar-sdk/contract";
 import { useWallet } from "@/lib/contexts/WalletContext";
 import { marketCore, reasoningRegistry, token, Outcomes, type OutcomeTag, type Signer } from "@/lib/stellar/clients";
-import { describeError, UserFacingError, type ContractName } from "@/lib/stellar/errors";
+import { UserFacingError } from "@/lib/stellar/errors";
 import { collateralOutForShares, priceYesBps } from "@/lib/stellar/generated/fpmm";
 import type { Market as OnChainMarket, Position } from "@/lib/stellar/generated/market-core";
 import { fetchAndVerifyTrace, type TraceCheck } from "@/lib/stellar/trace";
+import { read, submit, bytesToHex, simulated } from "@/lib/stellar/typed-call";
 import { maxIn, minOut } from "@/lib/stellar/units";
+
+export { read, submit, simulated, bytesToHex };
 
 /** Query keys all start with "stellar" so a disconnect can drop them in one go. */
 export const stellarKeys = {
@@ -23,47 +25,12 @@ export const stellarKeys = {
 
 const toId = (id: bigint | string | number) => BigInt(id);
 
-/**
- * The value of a simulated call. Contract `Result`s are unwrapped; failures
- * become a UserFacingError named from the simulation's "Error(Contract, #N)".
- */
-export function simulated<T>(tx: AssembledTransaction<unknown>, contract: ContractName = "marketCore"): T {
-  const sim = tx.simulation as { error?: string } | undefined;
-  let raw: unknown;
-  try {
-    raw = tx.result;
-  } catch (err) {
-    throw new UserFacingError(describeError(`${sim?.error ?? ""} ${String(err)}`, contract), err);
-  }
-  if (raw && typeof raw === "object" && "isOk" in raw && typeof (raw as { isOk: unknown }).isOk === "function") {
-    const result = raw as { isOk(): boolean; unwrap(): T };
-    if (!result.isOk()) throw new UserFacingError(describeError(`${sim?.error ?? ""}`, contract), raw);
-    return result.unwrap();
-  }
-  return raw as T;
-}
-
-async function send<T>(tx: AssembledTransaction<unknown>, contract: ContractName = "marketCore"): Promise<{ value: T; txHash: string | null }> {
-  // Surface simulation failures before asking the wallet to sign.
-  simulated<T>(tx, contract);
-  try {
-    const sent = await tx.signAndSend();
-    const value = sent.result as unknown;
-    const unwrapped =
-      value && typeof value === "object" && "unwrap" in value ? (value as { unwrap(): T }).unwrap() : (value as T);
-    return { value: unwrapped, txHash: sent.sendTransactionResponse?.hash ?? null };
-  } catch (err) {
-    if (err instanceof UserFacingError) throw err;
-    throw new UserFacingError(describeError(err, contract), err);
-  }
-}
-
 // ─── Reads ──────────────────────────────────────────────────────────────────
 
 export function useMarketCount() {
   return useQuery({
     queryKey: stellarKeys.marketCount,
-    queryFn: async () => simulated<bigint>(await marketCore().market_count()),
+    queryFn: async () => read(await marketCore().market_count()),
     staleTime: 30_000,
   });
 }
@@ -76,7 +43,7 @@ export interface OnChainMarketView {
 }
 
 export async function fetchOnChainMarket(id: bigint | string): Promise<OnChainMarketView> {
-  const market = simulated<OnChainMarket>(await marketCore().get_market({ market_id: toId(id) }));
+  const market = read(await marketCore().get_market({ market_id: toId(id) }));
   return { id: String(id), market, yesBps: Number(priceYesBps(market.reserve_yes, market.reserve_no)) };
 }
 
@@ -115,7 +82,7 @@ export function usePosition(id: bigint | string | null | undefined, holder: stri
     queryKey: stellarKeys.position(String(id), holder ?? ""),
     enabled: id !== null && id !== undefined && Boolean(holder),
     queryFn: async () =>
-      simulated<Position>(await marketCore().get_position({ market_id: toId(id as string), holder: holder as string })),
+      read(await marketCore().get_position({ market_id: toId(id as string), holder: holder as string })),
     staleTime: 15_000,
   });
 }
@@ -124,7 +91,7 @@ export function useUsdcBalance(owner: string | null | undefined) {
   return useQuery({
     queryKey: stellarKeys.balance(owner ?? ""),
     enabled: Boolean(owner),
-    queryFn: async () => simulated<bigint>(await token.balance(owner as string)),
+    queryFn: async () => read(await token.balance(owner as string)),
     staleTime: 15_000,
     refetchInterval: 30_000,
   });
@@ -136,7 +103,7 @@ export function useQuoteBuy(id: bigint | string | null | undefined, outcome: Out
     queryKey: stellarKeys.quoteBuy(String(id), outcome, collateralIn?.toString() ?? ""),
     enabled: id !== null && id !== undefined && collateralIn !== null && collateralIn > 0n,
     queryFn: async () =>
-      simulated<bigint>(
+      read(
         await marketCore().quote_buy({ market_id: toId(id as string), outcome: Outcomes[outcome], collateral_in: collateralIn as bigint }),
       ),
     staleTime: 5_000,
@@ -160,15 +127,8 @@ export function useVerifiedTrace(onChainTraceId: bigint | string | null | undefi
     queryKey: stellarKeys.trace(String(onChainTraceId)),
     enabled: onChainTraceId !== null && onChainTraceId !== undefined && onChainTraceId !== "",
     queryFn: async (): Promise<VerifiedTrace> => {
-      const trace = simulated<{
-        market_id: bigint;
-        agent: string;
-        action: string;
-        trace_hash: Uint8Array;
-        ipfs_cid: string;
-        published_at: bigint;
-      }>(await reasoningRegistry().get_trace({ trace_id: toId(onChainTraceId as string) }), "reasoningRegistry");
-      const onChainHash = Array.from(trace.trace_hash, (b) => b.toString(16).padStart(2, "0")).join("");
+      const trace = read(await reasoningRegistry().get_trace({ trace_id: toId(onChainTraceId as string) }), "reasoningRegistry");
+      const onChainHash = bytesToHex(trace.trace_hash);
       return {
         onChainTraceId: String(onChainTraceId),
         marketId: trace.market_id.toString(),
@@ -229,7 +189,7 @@ export function useBuy() {
       const signer = guard();
       if (collateralIn <= 0n) throw new UserFacingError({ kind: "contract", message: "Enter an amount greater than zero." });
       const id = toId(marketId);
-      const quote = simulated<bigint>(
+      const quote = read(
         await marketCore().quote_buy({ market_id: id, outcome: Outcomes[outcome], collateral_in: collateralIn }),
       );
       const minSharesOut = minOut(quote, slippageBps);
@@ -240,7 +200,7 @@ export function useBuy() {
         collateral_in: collateralIn,
         min_shares_out: minSharesOut,
       });
-      const { value, txHash } = await send<bigint>(tx);
+      const { value, txHash } = await submit(tx);
       return { sharesOut: value, quotedShares: quote, minSharesOut, txHash, holder: signer.publicKey };
     },
     onSuccess: (d, v) => invalidate(String(v.marketId), d.holder),
@@ -285,7 +245,7 @@ export function useSell() {
         collateral_out: collateralOut,
         max_shares_in: maxSharesIn,
       });
-      const { value, txHash } = await send<bigint>(tx);
+      const { value, txHash } = await submit(tx);
       return { sharesSold: value, collateralOut, maxSharesIn, txHash, holder: signer.publicKey };
     },
     onSuccess: (d, v) => invalidate(String(v.marketId), d.holder),
@@ -299,7 +259,7 @@ export function useRedeem() {
     mutationFn: async ({ marketId }: { marketId: bigint | string }) => {
       const signer = guard();
       const tx = await marketCore(signer).redeem({ holder: signer.publicKey, market_id: toId(marketId) });
-      const { value, txHash } = await send<bigint>(tx);
+      const { value, txHash } = await submit(tx);
       return { payout: value, txHash, holder: signer.publicKey };
     },
     onSuccess: (d, v) => invalidate(String(v.marketId), d.holder),
@@ -315,7 +275,7 @@ export function useUsdcTransfer() {
       const signer = guard();
       if (amount <= 0n) throw new UserFacingError({ kind: "contract", message: "Enter an amount greater than zero." });
       const tx = await token.transfer({ from: signer.publicKey, to, amount }, signer);
-      const { txHash } = await send<null>(tx);
+      const { txHash } = await submit(tx);
       if (!txHash) throw new UserFacingError({ kind: "unknown", message: "The payment was sent but no transaction hash came back." });
       return { txHash, holder: signer.publicKey };
     },

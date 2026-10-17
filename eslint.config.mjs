@@ -16,6 +16,19 @@ const eslintConfig = defineConfig([
     "contracts/**",
     "lib/stellar/generated/**",
   ]),
+  {
+    files: ["app/**/*.{ts,tsx}", "lib/**/*.{ts,tsx}", "e2e/**/*.{ts,tsx}"],
+    ignores: ["lib/stellar/typed-call.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "CallExpression[callee.name=/^(read|submit|simulated)$/] > TSTypeParameterInstantiation",
+          message: "Do not pass explicit type args to read/submit/simulated — the type is inferred from the binding.",
+        },
+      ],
+    },
+  },
 ]);
 
 export default eslintConfig;
