@@ -11,8 +11,8 @@ import { ApiError } from "@/lib/api/client";
 import { useBuy, useOnChainMarket, usePosition, useQuoteBuy, useUsdcBalance, useAccountReserve, usePrepareBuy } from "@/lib/hooks/useStellar";
 import { useWallet } from "@/lib/contexts/WalletContext";
 import { explorerTx } from "@/lib/stellar/config";
-import { formatUsdc, formatXlm, minOut, tryParseUsdc } from "@/lib/stellar/units";
-import { TxPhase } from "@/lib/stellar/tx-lifecycle";
+import { formatUsdc, minOut, tryParseUsdc } from "@/lib/stellar/units";
+import { buyBreakdown } from "@/lib/stellar/buy-breakdown";
 
 const SLIPPAGE_BPS = 100; // 1%
 
@@ -100,29 +100,17 @@ function MarketQuickViewContent() {
   const amountRaw = tryParseUsdc(amountInput);
   const debouncedAmount = useDebounced(amountRaw, 400);
   const quote = useQuoteBuy(onChainMarketId, side, debouncedAmount);
-  const prepareBuy = usePrepareBuy({
-    marketId: onChainMarketId,
-    outcome: side,
-    collateralIn: debouncedAmount,
-    slippageBps: SLIPPAGE_BPS,
-    holder: address,
-  });
-
-  const fees = prepareBuy.data?.fees;
-  const isUnfunded = Boolean(reserve.data && !reserve.data.funded);
-  const isInsufficientXlm = Boolean(
-    reserve.data?.funded &&
-    fees &&
-    reserve.data.spendable < fees.totalFee
-  );
-  const xlmDeficit = (reserve.data?.funded && fees && fees.totalFee > reserve.data.spendable)
-    ? fees.totalFee - reserve.data.spendable
+  const view = chain.data;
+  const breakdown = view && debouncedAmount && debouncedAmount > 0n
+    ? (() => {
+        const [bought, other] = side === "Yes" ? [view.market.reserve_yes, view.market.reserve_no] : [view.market.reserve_no, view.market.reserve_yes];
+        try { return buyBreakdown(bought, other, debouncedAmount, BigInt(view.market.fee_bps)); } catch { return null; }
+      })()
     : null;
 
   // Illustrative only: there is no price history source yet.
   const sparklinePath = "M0 25 L10 22 L20 28 L30 18 L40 20 L50 15 L60 17 L70 10 L80 12 L90 5 L100 8";
 
-  const view = chain.data;
   const fromChain = Boolean(view);
   const backendProb = market ? Math.round((market.currentYesProb ?? market.initialYesProb) * 100) : 50;
   const yesProb = view ? Math.round(view.yesBps / 100) : backendProb;
