@@ -10,6 +10,7 @@ import { UserFacingError, type ContractName } from "@/lib/stellar/errors";
 import { collateralOutForShares, priceYesBps } from "@/lib/stellar/generated/fpmm";
 import type { Config, Market as OnChainMarket, Position } from "@/lib/stellar/generated/market-core";
 import { fetchAndVerifyTrace, type TraceCheck } from "@/lib/stellar/trace";
+import { read, submit, bytesToHex, simulated } from "@/lib/stellar/typed-call";
 import { maxIn, minOut } from "@/lib/stellar/units";
 import {
   feeBreakdown,
@@ -29,6 +30,8 @@ import { NETWORK_PASSPHRASE } from "@/lib/stellar/config";
 
 export { simulated };
 export { tradeInvalidationKeys };
+
+export { read, submit, simulated, bytesToHex };
 
 /** Query keys all start with "stellar" so a disconnect can drop them in one go. */
 export const stellarKeys = {
@@ -99,7 +102,7 @@ function assertSignerCurrent(guard: () => Signer, expectedAddress: string): Sign
 export function useMarketCount() {
   return useQuery({
     queryKey: stellarKeys.marketCount,
-    queryFn: async () => simulated<bigint>(await marketCore().market_count()),
+    queryFn: async () => read(await marketCore().market_count()),
     staleTime: 30_000,
   });
 }
@@ -128,7 +131,7 @@ export interface OnChainMarketView {
 }
 
 export async function fetchOnChainMarket(id: bigint | string): Promise<OnChainMarketView> {
-  const market = simulated<OnChainMarket>(await marketCore().get_market({ market_id: toId(id) }));
+  const market = read(await marketCore().get_market({ market_id: toId(id) }));
   return { id: String(id), market, yesBps: Number(priceYesBps(market.reserve_yes, market.reserve_no)) };
 }
 
@@ -167,7 +170,7 @@ export function usePosition(id: bigint | string | null | undefined, holder: stri
     queryKey: stellarKeys.position(String(id), holder ?? ""),
     enabled: id !== null && id !== undefined && Boolean(holder),
     queryFn: async () =>
-      simulated<Position>(await marketCore().get_position({ market_id: toId(id as string), holder: holder as string })),
+      read(await marketCore().get_position({ market_id: toId(id as string), holder: holder as string })),
     staleTime: 15_000,
   });
 }
@@ -176,7 +179,7 @@ export function useUsdcBalance(owner: string | null | undefined) {
   return useQuery({
     queryKey: stellarKeys.balance(owner ?? ""),
     enabled: Boolean(owner),
-    queryFn: async () => simulated<bigint>(await token.balance(owner as string)),
+    queryFn: async () => read(await token.balance(owner as string)),
     staleTime: 15_000,
     refetchInterval: 30_000,
   });
@@ -269,7 +272,7 @@ export function useQuoteBuy(id: bigint | string | null | undefined, outcome: Out
     queryKey: stellarKeys.quoteBuy(String(id), outcome, collateralIn?.toString() ?? ""),
     enabled: id !== null && id !== undefined && collateralIn !== null && collateralIn > 0n,
     queryFn: async () =>
-      simulated<bigint>(
+      read(
         await marketCore().quote_buy({ market_id: toId(id as string), outcome: Outcomes[outcome], collateral_in: collateralIn as bigint }),
       ),
     staleTime: 5_000,
@@ -396,15 +399,8 @@ export function useVerifiedTrace(onChainTraceId: bigint | string | null | undefi
     queryKey: stellarKeys.trace(String(onChainTraceId)),
     enabled: onChainTraceId !== null && onChainTraceId !== undefined && onChainTraceId !== "",
     queryFn: async (): Promise<VerifiedTrace> => {
-      const trace = simulated<{
-        market_id: bigint;
-        agent: string;
-        action: string;
-        trace_hash: Uint8Array;
-        ipfs_cid: string;
-        published_at: bigint;
-      }>(await reasoningRegistry().get_trace({ trace_id: toId(onChainTraceId as string) }), "reasoningRegistry");
-      const onChainHash = Array.from(trace.trace_hash, (b) => b.toString(16).padStart(2, "0")).join("");
+      const trace = read(await reasoningRegistry().get_trace({ trace_id: toId(onChainTraceId as string) }), "reasoningRegistry");
+      const onChainHash = bytesToHex(trace.trace_hash);
       return {
         onChainTraceId: String(onChainTraceId),
         marketId: trace.market_id.toString(),

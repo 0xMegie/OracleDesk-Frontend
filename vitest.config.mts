@@ -8,5 +8,6 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["lib/**/*.test.ts"],
+    typecheck: { enabled: true, include: ["lib/**/*.test-d.ts"], tsconfig: "./tsconfig.json" },
   },
 });
