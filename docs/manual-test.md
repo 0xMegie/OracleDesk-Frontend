@@ -119,6 +119,21 @@ To try the same on market 0 (resolved): the buy button is disabled and the panel
 - [ ] If spendable XLM is below the total fee: verify the message "You need about X more XLM to pay the network fee." is displayed and the Buy button is disabled.
 - [ ] Verify the same fee preview, spendable XLM display, and blocking warnings appear on `/copy-trade` (next to slippage text) and `/premium` (in the checkout modal above the pay button).
 
+## 12. Notifications inbox
+
+- [ ] Disconnected, `/notifications` shows a connect prompt and no feed; the bell has no badge.
+- [ ] Connect wallet A in browser 1 and wallet B in browser 2. Buy with A: only A gets a "Buy filled" item, and A's bell shows `1` with an accessible label "Notifications, 1 unread".
+- [ ] Scroll the item into view for one second (or click **Mark read**): the count drops. Reload: read state is kept.
+- [ ] Switch to another account: the previous account's items never appear, even briefly.
+- [ ] Resolve or void a seeded market you hold (`seed-market.sh` in the contracts repo). Within about a minute a "redeemable" item appears linking to quick-view.
+- [ ] In a private window where IndexedDB is blocked, the page says "Notifications won't be saved in this browser".
+
+## 13. Optimistic updates and trade tape
+
+- [ ] After a buy in quick-view, "Your position" and the wallet dropdown balance update at once, with "pending confirmation" and a `tx` link; within a few seconds the marker clears.
+- [ ] Quick-view lists recent trades for the market, with YES/NO and BUY/SELL as text, linking to the trader and the transaction. A new trade appears at the top without duplicating when the RPC copy arrives.
+- [ ] **Load older** pages back until the "beyond the RPC's retention window" notice.
+
 ## Also worth clicking
 
 - [ ] `/premium` → **Get a daily pass** → **Pay with wallet**. Freighter shows a USDC `transfer` to the treasury (`CBTFA3EP…`) for 0.50 USDC. After approval the backend verifies it on-chain and says the pass is active. Note: until `PAYMENTS_RECIPIENT` is decided, this payment becomes treasury trading capital (see docs/STATUS.md).

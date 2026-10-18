@@ -37,6 +37,20 @@ npm run build
 `npm run e2e:testnet` is an optional, read-only check against a running
 backend and live testnet; see the header of `e2e/testnet.e2e.test.ts`.
 
+## Realtime burst testing
+
+`scripts/realtime-burst.mjs` emits synthetic `TRADE_EXECUTED` events so you can
+check that realtime feeds stay smooth under bursts (issue #41):
+
+```bash
+npm i --no-save socket.io@4.8.1          # server package, not a project dependency
+node scripts/realtime-burst.mjs --count 500 --rate 500 --port 4100
+NEXT_PUBLIC_API_URL=http://localhost:4100/api/v1 npm run dev
+```
+
+Open `/markets?profile=1` or `/?profile=1`: in development the feeds log commit
+counts and render time per second to the console (`[profile] …`).
+
 ## When the contracts change
 
 The contracts live in

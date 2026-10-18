@@ -8,6 +8,8 @@ The frontend has two sources that can disagree, and it says which one a value ca
 |---|---|---|
 | Prices, reserves, market status, positions, USDC balance | **Chain**, via simulated contract calls (`lib/hooks/useStellar.ts`) | The contract is the truth; the backend's copy can lag. |
 | Question text, category, reasoning traces (metadata), subscriptions, platform counts | **Backend** (`lib/api/*`, `docs/api.md`) | Not stored on-chain in readable form. |
+| Per-market trade tape (quick-view) | **Chain events**: market-core `Trade` events via RPC `getEvents`, topic-filtered by market id (`lib/stellar/events.ts`, `components/market/trade-tape.tsx`) | Every trade is a public contract event. Only covers the RPC's retention window (days, not months); older trades are not shown and the tape says so. Live socket rows are replaced by decoded RPC rows on refetch. |
+| Notifications inbox | **Chain events + socket**, stored per wallet and network in IndexedDB (`lib/notifications/*`) | Derived from the connected address only: own fills, held markets resolving, own redemptions, traces on held markets, own failed/pending txs. Nothing is stored server-side. |
 | Trace content | **IPFS**, then hash-checked against `reasoning_registry.get_trace` | Gateways are not authenticated; content is shown only if its sha256 matches the chain (`lib/stellar/trace.ts`). |
 
 A backend market links to the chain through `onChainMarketId` (market-core's `u64` id, a decimal string in JSON). On-chain markets the backend doesn't know are still listed on `/markets`, with on-chain data only.
@@ -27,6 +29,24 @@ A backend market links to the chain through `onChainMarketId` (market-core's `u6
 - Reads are simulations (no fee, no signature).
 - Writes (`useBuy`, `useSell`, `useRedeem`, `useUsdcTransfer`) check that a wallet is connected and on the right network, run fresh contract preflight checks, simulate, then `signAndSend`. A per-address queue serializes complete build/sign/send jobs in this tab and coordinates browser tabs with Web Locks (or a local-storage lease fallback); stale-sequence errors receive one fresh-build retry. The buy, sell, redeem, and USDC-transfer paths can decode the final simulated contract invocation and show its arguments and transaction envelope for review before the wallet prompt.
 - `useBuy` quotes again immediately before building the transaction and sets `min_shares_out = minOut(quote, slippageBps)`, so slippage is enforced on-chain.
+### Optimistic position and balance updates
+
+After a confirmed `buy`, `sell` or `redeem`, the hooks write the contract's own
+return value (`shares_out`, `shares_in`, `payout`) into the position and USDC
+balance caches immediately, marked provisional with the tx hash and the ledger
+the tx landed in (`lib/stellar/optimistic.ts`). Rules:
+
+- Position and balance queries store `{ value, ledger }`, where `ledger` is the
+  read simulation's `latestLedger`. Components still see plain values via `select`;
+  `usePositionState` / `useUsdcBalanceState` expose the provisional marker.
+- In-flight reads are cancelled before signing, and the query function never
+  replaces a provisional value with a read simulated at a lower ledger.
+- Reconciliation re-reads after 1 s, 3 s and 8 s. A read at or above the tx ledger
+  clears the marker; if it differs, the chain value wins and `[optimistic] mismatch`
+  is logged. If the RPC still lags, the value stays, labelled "awaiting RPC".
+- Rejected or failed writes restore the snapshot. An unknown outcome, or a
+  missing landing ledger, falls back to plain invalidation with no optimistic write.
+
 ## Write path and transaction lifecycle
 
 Every state-changing write (`useBuy`, `useSell`, `useRedeem`, `useUsdcTransfer`) follows an explicit, observable lifecycle governed by `TxLifecycle` in `lib/stellar/tx-lifecycle.ts`:

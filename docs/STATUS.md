@@ -65,6 +65,18 @@ DEMO_TRACE_FILE=<rebuilt demo trace bytes> DEMO_TRACE_ID=1 npm run e2e:testnet
 3. Login with a throwaway keypair: backend `scripts/smoke.sh`, passed.
 4. Trace #1 from `scripts/demo.sh`: bytes rebuilt from the script's template hash to the on-chain `38f728a8…` and verify; a tampered copy is a mismatch; the real gateway can't serve the placeholder CID, so it's `unavailable` and no content is rendered.
 
+## Realtime batching profile (issue #41)
+
+Measured with `scripts/realtime-burst.mjs` and `?profile=1` (React Profiler,
+development build). Fill in after running locally:
+
+| Scenario | Feed | Commits/s before | Commits/s after | actualDuration/s before | after |
+|---|---|---|---|---|---|
+| 500 events @ 500/s | TradingFeed | _todo_ | _todo_ | _todo_ | _todo_ |
+| 500 events @ 500/s | AgentActivityFeed | _todo_ | _todo_ | _todo_ | _todo_ |
+| 500 events @ 50/s | TradingFeed | _todo_ | _todo_ | _todo_ | _todo_ |
+| 500 events @ 50/s | AgentActivityFeed | _todo_ | _todo_ | _todo_ | _todo_ |
+
 ## Not verified (and how to verify)
 
 Everything that needs a browser wallet. Follow [docs/manual-test.md](manual-test.md), which lists every click:

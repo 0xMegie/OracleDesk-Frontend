@@ -96,3 +96,16 @@ export async function submit<Tx extends AssembledTransaction<any>>(
  * the binding method signature without requiring explicit type arguments.
  */
 export const simulated = read;
+
+/**
+ * Like `read`, but also returns the ledger the simulation ran against, so
+ * caches can tell a stale read from a fresh one.
+ */
+export function simulatedWithLedger<Tx extends AssembledTransaction<any>>(
+  tx: Tx,
+  contract: ContractName = "marketCore",
+): { value: Unwrapped<TxValue<Tx>>; ledger: number } {
+  const value = read(tx, contract);
+  const sim = tx.simulation as { latestLedger?: number } | undefined;
+  return { value, ledger: sim?.latestLedger ?? 0 };
+}

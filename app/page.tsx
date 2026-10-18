@@ -1,16 +1,19 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import Link from "next/link";
-import { motion } from "framer-motion";
-import { io } from "socket.io-client";
+import { motion, useReducedMotion } from "framer-motion";
 import { useWallet } from "@/lib/contexts/WalletContext";
 import { useMarkets } from "@/lib/hooks/useMarkets";
-import { API_URL } from "@/lib/api/client";
+import { useBurstFeed } from "@/lib/realtime/useBurst";
+import { FeedProfiler } from "@/lib/realtime/FeedProfiler";
+import type { ReasoningPublishedPayload, TradeExecutedPayload } from "@/lib/realtime/RealtimeProvider";
 import { formatUsdc } from "@/lib/stellar/units";
 import { DemoBadge } from "@/components/ui/demo-badge";
 
 interface FeedItem {
+  key: string;
+  receivedAt: number;
   time: string;
   agent: string;
   action: string;
@@ -19,57 +22,69 @@ interface FeedItem {
   color: string;
 }
 
+// Socket payloads carry a ledger but no close time, so this is receipt time.
+const receiptTime = () => new Date().toLocaleTimeString("en-GB", { hour12: false });
+
+const tradeToFeedItem = (data: TradeExecutedPayload): FeedItem => ({
+  key: `trade:${data.eventId}`,
+  receivedAt: Date.now(),
+  time: receiptTime(),
+  agent: "Trader",
+  action: data.isBuy ? "BUY" : "SELL",
+  details: `${data.direction} ${formatUsdc(BigInt(data.collateralRaw), { maxDecimals: 2, grouping: true })} USDC on #${data.onChainMarketId} · YES ${(data.priceYesBps / 100).toFixed(1)}%`,
+  chain: "Stellar",
+  color: "text-secondary",
+});
+
+const traceToFeedItem = (data: ReasoningPublishedPayload): FeedItem => ({
+  key: `trace:${data.onChainTraceId}`,
+  receivedAt: Date.now(),
+  time: receiptTime(),
+  agent: "Reasoner",
+  action: "PUBLISH_TRACE",
+  details: `Trace #${data.onChainTraceId} (${data.action})`,
+  chain: "Stellar",
+  color: "text-primary-fixed",
+});
+
+const feedKey = (item: FeedItem) => item.key;
+const FEED_CAPACITY = 6;
+
 const AgentActivityFeed = () => {
-  const [feed, setFeed] = useState<FeedItem[]>([]);
-
-  useEffect(() => {
-    const socket = io(API_URL.replace(/\/api\/v1\/?$/, ""));
-
-    // Payloads are documented in docs/api.md (Realtime).
-    socket.on("TRADE_EXECUTED", (data: { direction: string; isBuy: boolean; collateralRaw: string; priceYesBps: number; onChainMarketId: string }) => {
-      const time = new Date().toLocaleTimeString('en-GB', { hour12: false });
-      setFeed(prev => [{
-        time,
-        agent: "Trader",
-        action: data.isBuy ? "BUY" : "SELL",
-        details: `${data.direction} ${formatUsdc(BigInt(data.collateralRaw), { maxDecimals: 2, grouping: true })} USDC on #${data.onChainMarketId} · YES ${(data.priceYesBps / 100).toFixed(1)}%`,
-        chain: "Stellar",
-        color: "text-secondary"
-      }, ...prev.slice(0, 5)]);
-    });
-
-    socket.on("REASONING_PUBLISHED", (data: { onChainTraceId: string; action: string }) => {
-      const time = new Date().toLocaleTimeString('en-GB', { hour12: false });
-      setFeed(prev => [{
-        time,
-        agent: "Reasoner",
-        action: "PUBLISH_TRACE",
-        details: `Trace #${data.onChainTraceId} (${data.action})`,
-        chain: "Stellar",
-        color: "text-primary-fixed"
-      }, ...prev.slice(0, 5)]);
-    });
-
-    return () => {
-      socket.disconnect();
-    };
-  }, []);
+  const trades = useBurstFeed("TRADE_EXECUTED", { capacity: FEED_CAPACITY, toRow: tradeToFeedItem, key: feedKey });
+  const traces = useBurstFeed("REASONING_PUBLISHED", { capacity: FEED_CAPACITY, toRow: traceToFeedItem, key: feedKey });
+  const feed = useMemo(
+    () => [...trades.rows, ...traces.rows].sort((a, b) => b.receivedAt - a.receivedAt).slice(0, FEED_CAPACITY),
+    [trades.rows, traces.rows],
+  );
+  const burst = trades.burst ?? traces.burst;
+  const hiddenOverflow = trades.hiddenOverflow + traces.hiddenOverflow;
 
   return (
     <div className="bg-on-background rounded-xl overflow-hidden shadow-2xl border border-outline border-opacity-30">
       <div className="px-6 py-4 border-b border-white/10 flex justify-between items-center bg-white/5">
         <div className="flex items-center gap-2">
-          <span className="material-symbols-outlined text-secondary animate-pulse">monitoring</span>
+          <span className="material-symbols-outlined text-secondary animate-pulse motion-reduce:animate-none">monitoring</span>
           <h3 className="font-headline-sm text-headline-sm text-white uppercase tracking-widest text-xs">Live Agent Activity</h3>
         </div>
-        <span className="text-white/30 text-[9px] font-data-mono uppercase">Stellar Testnet</span>
+        <span className="text-white/30 text-[9px] font-data-mono uppercase">Stellar Testnet · receipt time</span>
       </div>
       <div className="p-6 h-[320px] overflow-y-auto font-data-mono text-[11px] space-y-3 custom-scrollbar">
+        {burst && (
+          <p className="text-white/50" role="status">
+            {burst.count} events in the last second
+          </p>
+        )}
+        {hiddenOverflow > 0 && (
+          <p className="text-white/50" role="status">
+            {hiddenOverflow} more events while this tab was hidden
+          </p>
+        )}
         {feed.length === 0 && (
           <p className="text-white/40">Waiting for agent activity on-chain…</p>
         )}
-        {feed.map((item, i) => (
-          <div key={i} className="flex gap-4 border-l border-white/10 pl-4 py-1 hover:bg-white/5 transition-colors group">
+        {feed.map((item) => (
+          <div key={item.key} className="flex gap-4 border-l border-white/10 pl-4 py-1 hover:bg-white/5 transition-colors group">
             <span className="text-white/20 whitespace-nowrap">[{item.time}]</span>
             <span className="text-primary font-bold whitespace-nowrap">{item.agent}</span>
             <span className={`font-black ${item.color} whitespace-nowrap`}>{item.action}</span>
@@ -129,10 +144,25 @@ const Ticker = () => {
       })
     : ["NO LIVE MARKETS YET"];
 
+  const reduceMotion = useReducedMotion();
+
+  // Reduced motion: a static list, not a frozen half-scrolled marquee.
+  if (reduceMotion) {
+    return (
+      <div className="bg-on-background text-primary-fixed-dim py-2 border-b border-outline overflow-hidden">
+        <ul className="font-data-mono text-data-mono uppercase flex flex-wrap gap-x-8 gap-y-1 px-gutter">
+          {tickerItems.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+
   return (
     <div className="bg-on-background text-primary-fixed-dim py-2 border-b border-outline overflow-hidden">
       <div className="ticker-wrap w-full">
-        <div className="ticker-content animate-ticker font-data-mono text-data-mono uppercase flex gap-8 whitespace-nowrap">
+        <div className="ticker-content animate-ticker motion-reduce:animate-none font-data-mono text-data-mono uppercase flex gap-8 whitespace-nowrap">
           {[...tickerItems, ...tickerItems, ...tickerItems].map((item, i) => (
             <span key={i}>{item} •</span>
           ))}
@@ -529,7 +559,7 @@ export default function Home() {
         <section className="bg-white py-12 border-b border-outline-variant">
           <div className="max-w-container-max-width mx-auto px-gutter grid lg:grid-cols-3 gap-8">
             <div className="lg:col-span-2">
-              <AgentActivityFeed />
+              <FeedProfiler id="AgentActivityFeed"><AgentActivityFeed /></FeedProfiler>
             </div>
             <div>
               <ProtocolActivity />

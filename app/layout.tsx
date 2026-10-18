@@ -3,6 +3,8 @@ import type { Metadata } from "next";
 import Navbar from "@/components/layout/Navbar";
 import { Footer } from "@/components/layout/Footer";
 import { WalletProvider } from "@/lib/contexts/WalletContext";
+import { RealtimeProvider } from "@/lib/realtime/RealtimeProvider";
+import { InboxProvider } from "@/lib/notifications/InboxProvider";
 import "./globals.css";
 
 const geistSans = {
@@ -40,9 +42,13 @@ export default function RootLayout({
       </head>
       <body className="min-h-full flex flex-col font-body-md text-on-surface">
         <WalletProvider>
-          <Navbar />
-          {children}
-          <Footer />
+          <RealtimeProvider>
+            <InboxProvider>
+              <Navbar />
+              {children}
+              <Footer />
+            </InboxProvider>
+          </RealtimeProvider>
         </WalletProvider>
       </body>
     </html>

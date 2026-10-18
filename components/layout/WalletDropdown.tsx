@@ -3,7 +3,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useWallet } from "@/lib/contexts/WalletContext";
-import { useAccountReserve, useEnableUsdc, useRpcNetwork, useUsdcBalance, useUsdcTrustline } from "@/lib/hooks/useStellar";
+import { useAccountReserve, useEnableUsdc, useRpcNetwork, useUsdcBalance, useUsdcBalanceState, useUsdcTrustline } from "@/lib/hooks/useStellar";
 import { NETWORK_LABEL, NETWORK_PASSPHRASE, TESTNET_PASSPHRASE, explorerAccount } from "@/lib/stellar/config";
 import { formatUsdc, formatXlm, shortAddress } from "@/lib/stellar/units";
 
@@ -13,6 +13,7 @@ const WalletDropdown = () => {
   const [copied, setCopied] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const balance = useUsdcBalance(address);
+  const balanceProvisional = useUsdcBalanceState(address).data?.provisional;
   const trustline = useUsdcTrustline(address);
   const enableUsdc = useEnableUsdc();
   const reserve = useAccountReserve(address);
@@ -122,6 +123,14 @@ const WalletDropdown = () => {
                 <span className="text-xl font-bold text-on-surface font-data-mono">
                   {balanceText}
                 </span>
+                {balanceProvisional && (
+                  <span
+                    role="status"
+                    aria-label="Balance pending on-chain confirmation"
+                    title="Pending on-chain confirmation"
+                    className="w-2 h-2 rounded-full bg-tertiary animate-pulse motion-reduce:animate-none self-center"
+                  />
+                )}
                 <span className="text-xs font-bold text-on-surface-variant uppercase">
                   USDC
                 </span>

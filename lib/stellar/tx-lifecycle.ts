@@ -99,7 +99,7 @@ export class TxLifecycle<T> {
   async run(
     tx: AssembledTransaction<T>,
     parse: (v: xdr.ScVal | undefined) => T,
-  ): Promise<{ value: T; txHash: string }> {
+  ): Promise<{ value: T; txHash: string; ledger: number | null }> {
     // 1. Simulating
     this.setPhase({ name: "simulating" });
     try {
@@ -202,13 +202,15 @@ export class TxLifecycle<T> {
         } catch {
           value = (getRes.returnValue ? scValToNative(getRes.returnValue) : null) as T;
         }
+        const ledger = getRes.ledger ?? getRes.latestLedger;
         this.setPhase({
           name: "confirmed",
           hash,
-          ledger: getRes.ledger ?? getRes.latestLedger,
+          ledger,
           returnValue: getRes.returnValue,
         });
-        return { value, txHash: hash };
+        // The ledger the tx landed in; reads at or after it reflect the write.
+        return { value, txHash: hash, ledger: typeof getRes.ledger === "number" ? getRes.ledger : null };
       }
 
       if (getRes.status === "FAILED") {

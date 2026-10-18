@@ -8,11 +8,14 @@ import { useQuery } from "@tanstack/react-query";
 import { useMarket } from "@/lib/hooks/useMarkets";
 import { getMarketByOnChainId } from "@/lib/api/markets";
 import { ApiError } from "@/lib/api/client";
-import { useBuy, useOnChainMarket, usePosition, useQuoteBuy, useUsdcBalance, useAccountReserve, usePrepareBuy } from "@/lib/hooks/useStellar";
+import { useBuy, useOnChainMarket, usePosition, usePositionState, useQuoteBuy, useUsdcBalance, useAccountReserve, usePrepareBuy } from "@/lib/hooks/useStellar";
 import { useWallet } from "@/lib/contexts/WalletContext";
 import { explorerTx } from "@/lib/stellar/config";
 import { formatUsdc, minOut, tryParseUsdc } from "@/lib/stellar/units";
 import { buyBreakdown } from "@/lib/stellar/buy-breakdown";
+import { TradeTape } from "@/components/market/trade-tape";
+import { useInbox } from "@/lib/notifications/InboxProvider";
+import { UserFacingError } from "@/lib/stellar/errors";
 
 const SLIPPAGE_BPS = 100; // 1%
 
@@ -89,6 +92,9 @@ function MarketQuickViewContent() {
 
   const { address, isConnected, isWrongNetwork, openModal } = useWallet();
   const position = usePosition(onChainMarketId, address);
+  const positionState = usePositionState(onChainMarketId, address);
+  const { recordTx } = useInbox();
+  const provisional = positionState.data?.provisional;
   const balance = useUsdcBalance(address);
   const reserve = useAccountReserve(address);
   const buy = useBuy();
@@ -201,6 +207,16 @@ function MarketQuickViewContent() {
       );
     } catch (err) {
       setBuyStatus(err instanceof Error ? err.message : "The trade didn't go through.");
+      // Same deterministic id as the tracker's record when a hash exists.
+      if (err instanceof UserFacingError) {
+        recordTx({
+          hash: "hash" in buy.phase && buy.phase.hash ? buy.phase.hash : null,
+          kind: "buy",
+          marketId: String(onChainMarketId),
+          errorKind: err.described.kind,
+          message: err.message,
+        });
+      }
     }
   };
 
@@ -478,7 +494,25 @@ function MarketQuickViewContent() {
                     {position.data && (position.data.yes > 0n || position.data.no > 0n) && (
                       <p className="text-[11px] font-data-mono text-on-surface">
                         Your position: {formatUsdc(position.data.yes, { maxDecimals: 2 })} YES · {formatUsdc(position.data.no, { maxDecimals: 2 })} NO
-                        <SourceTag source="chain" />
+                        {provisional ? (
+                          <>
+                            <span className="ml-1 text-on-surface-variant">
+                              {provisional.awaitingRpc ? "awaiting RPC" : "pending confirmation"}
+                            </span>
+                            {provisional.txHash ? (
+                              <a
+                                href={explorerTx(provisional.txHash)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="ml-1 text-[9px] uppercase tracking-wider text-primary hover:underline"
+                              >
+                                tx
+                              </a>
+                            ) : null}
+                          </>
+                        ) : (
+                          <SourceTag source="chain" />
+                        )}
                       </p>
                     )}
 
@@ -505,6 +539,8 @@ function MarketQuickViewContent() {
                     )}
                   </div>
                 )}
+
+                {onChainMarketId !== null && <TradeTape onChainMarketId={String(onChainMarketId)} limit={20} compact />}
 
                 {/* AI Reasoning Snippet */}
                 <div className="bg-[#f0f9fa] border border-primary-container/20 p-4 rounded-lg space-y-2 relative overflow-hidden">

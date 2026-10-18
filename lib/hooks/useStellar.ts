@@ -10,7 +10,22 @@ import { UserFacingError, type ContractName } from "@/lib/stellar/errors";
 import { collateralOutForShares, priceYesBps } from "@/lib/stellar/generated/fpmm";
 import type { Config, Market as OnChainMarket, Position } from "@/lib/stellar/generated/market-core";
 import { fetchAndVerifyTrace, type TraceCheck } from "@/lib/stellar/trace";
-import { read, submit, bytesToHex, simulated } from "@/lib/stellar/typed-call";
+import { read, submit, bytesToHex, simulated, simulatedWithLedger } from "@/lib/stellar/typed-call";
+import {
+  applyBuy,
+  applyRedeem,
+  applySell,
+  balanceDelta,
+  bigintEquals,
+  guardRead,
+  positionEquals,
+  reconcile,
+  stackProvisional,
+  RECONCILE_DELAYS_MS,
+  type Provisional,
+  type Stamped,
+  type WriteResult,
+} from "@/lib/stellar/optimistic";
 import { maxIn, minOut } from "@/lib/stellar/units";
 import {
   feeBreakdown,
@@ -31,7 +46,8 @@ import { NETWORK_PASSPHRASE } from "@/lib/stellar/config";
 export { simulated };
 export { tradeInvalidationKeys };
 
-export { read, submit, simulated, bytesToHex };
+export { read, submit, simulated, bytesToHex, simulatedWithLedger };
+export type { Stamped, Provisional };
 
 /** Query keys all start with "stellar" so a disconnect can drop them in one go. */
 export const stellarKeys = {
@@ -166,24 +182,65 @@ export function useOnChainMarkets(limit = 20) {
   });
 }
 
-export function usePosition(id: bigint | string | null | undefined, holder: string | null | undefined) {
+async function readPosition(id: bigint, holder: string): Promise<Stamped<Position>> {
+  return simulatedWithLedger(await marketCore().get_position({ market_id: id, holder }));
+}
+
+async function readUsdcBalance(owner: string): Promise<Stamped<bigint>> {
+  return simulatedWithLedger(await token.balance(owner));
+}
+
+function usePositionQuery<S>(
+  id: bigint | string | null | undefined,
+  holder: string | null | undefined,
+  select: (d: Stamped<Position>) => S,
+) {
+  const queryClient = useQueryClient();
+  const key = stellarKeys.position(String(id), holder ?? "");
   return useQuery({
-    queryKey: stellarKeys.position(String(id), holder ?? ""),
+    queryKey: key,
     enabled: id !== null && id !== undefined && Boolean(holder),
+    // Guarded: a read simulated below a provisional write's ledger is stale
+    // and must not overwrite the optimistic value (issue #39).
     queryFn: async () =>
-      read(await marketCore().get_position({ market_id: toId(id as string), holder: holder as string })),
+      guardRead(queryClient.getQueryData<Stamped<Position>>(key), await readPosition(toId(id as string), holder as string)),
+    select,
     staleTime: 15_000,
   });
 }
 
-export function useUsdcBalance(owner: string | null | undefined) {
+function useUsdcBalanceQuery<S>(owner: string | null | undefined, select: (d: Stamped<bigint>) => S) {
+  const queryClient = useQueryClient();
+  const key = stellarKeys.balance(owner ?? "");
   return useQuery({
-    queryKey: stellarKeys.balance(owner ?? ""),
+    queryKey: key,
     enabled: Boolean(owner),
-    queryFn: async () => read(await token.balance(owner as string)),
+    queryFn: async () => guardRead(queryClient.getQueryData<Stamped<bigint>>(key), await readUsdcBalance(owner as string)),
+    select,
     staleTime: 15_000,
     refetchInterval: 30_000,
   });
+}
+
+const unwrapStamped = <T,>(d: Stamped<T>) => d.value;
+const keepStamped = <T,>(d: Stamped<T>) => d;
+
+export function usePosition(id: bigint | string | null | undefined, holder: string | null | undefined) {
+  return usePositionQuery(id, holder, unwrapStamped<Position>);
+}
+
+/** The stamped position, including the provisional marker after a write. */
+export function usePositionState(id: bigint | string | null | undefined, holder: string | null | undefined) {
+  return usePositionQuery(id, holder, keepStamped<Position>);
+}
+
+export function useUsdcBalance(owner: string | null | undefined) {
+  return useUsdcBalanceQuery(owner, unwrapStamped<bigint>);
+}
+
+/** The stamped USDC balance, including the provisional marker after a write. */
+export function useUsdcBalanceState(owner: string | null | undefined) {
+  return useUsdcBalanceQuery(owner, keepStamped<bigint>);
 }
 
 export interface AccountReserveState extends AccountReserve {
@@ -449,13 +506,160 @@ function useWriteGuard(): () => Signer {
 
 export function useInvalidateAfterTrade() {
   const queryClient = useQueryClient();
-  return (marketId: string, holder: string) => {
+  return (marketId: string, holder: string, opts: { skipHolderKeys?: boolean } = {}) => {
+    const holderKeys = new Set([
+      JSON.stringify(stellarKeys.position(marketId, holder)),
+      JSON.stringify(stellarKeys.balance(holder)),
+    ]);
     for (const key of tradeInvalidationKeys(marketId, holder)) {
+      // Position and balance are reconciled by ledger instead (issue #39).
+      if (opts.skipHolderKeys && holderKeys.has(JSON.stringify(key))) continue;
       queryClient.invalidateQueries({ queryKey: key });
     }
     // Fees change the XLM balance, so the account entry is stale after a trade.
     queryClient.invalidateQueries({ queryKey: stellarKeys.account(holder) });
   };
+}
+
+interface OptimisticSnapshot {
+  position?: Stamped<Position>;
+  balance?: Stamped<bigint>;
+}
+
+/**
+ * Optimistic position/balance updates with ledger-aware reconciliation
+ * (issue #39). Values come only from the contract's return value.
+ */
+function useOptimisticTrade() {
+  const queryClient = useQueryClient();
+  const { address } = useWallet();
+  const addressRef = useRef(address);
+  addressRef.current = address;
+
+  /** Cancel in-flight reads so they cannot resolve after the write and win. */
+  const begin = useCallback(
+    async (marketId: string, holder: string | null | undefined): Promise<OptimisticSnapshot> => {
+      if (!holder) return {};
+      const posKey = stellarKeys.position(marketId, holder);
+      const balKey = stellarKeys.balance(holder);
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: posKey }),
+        queryClient.cancelQueries({ queryKey: balKey }),
+      ]);
+      return {
+        position: queryClient.getQueryData<Stamped<Position>>(posKey),
+        balance: queryClient.getQueryData<Stamped<bigint>>(balKey),
+      };
+    },
+    [queryClient],
+  );
+
+  const rollback = useCallback(
+    (marketId: string, holder: string | null | undefined, snap: OptimisticSnapshot | undefined) => {
+      if (!holder || !snap) return;
+      if (snap.position) queryClient.setQueryData(stellarKeys.position(marketId, holder), snap.position);
+      if (snap.balance) queryClient.setQueryData(stellarKeys.balance(holder), snap.balance);
+    },
+    [queryClient],
+  );
+
+  const scheduleReconcile = useCallback(
+    <T,>(key: readonly unknown[], holder: string, read: () => Promise<Stamped<T>>, equals: (a: T, b: T) => boolean) => {
+      let attempt = 0;
+      const tick = async () => {
+        const current = queryClient.getQueryData<Stamped<T>>(key);
+        // Disconnected or switched wallet: the key is gone, nothing to do.
+        if (!current?.provisional || addressRef.current !== holder) return;
+        let fresh: Stamped<T>;
+        try {
+          fresh = await read();
+        } catch {
+          fresh = { value: current.value, ledger: -1 };
+        }
+        const latest = queryClient.getQueryData<Stamped<T>>(key);
+        if (!latest?.provisional || addressRef.current !== holder) return;
+        const outcome = reconcile(latest, fresh, equals);
+        if (outcome.status === "lagging") {
+          attempt++;
+          if (attempt < RECONCILE_DELAYS_MS.length) {
+            setTimeout(tick, RECONCILE_DELAYS_MS[attempt] - RECONCILE_DELAYS_MS[attempt - 1]);
+          } else {
+            // Keep the provisional value but say the RPC hasn't caught up.
+            queryClient.setQueryData<Stamped<T>>(key, { ...latest, provisional: { ...latest.provisional, awaitingRpc: true } });
+          }
+          return;
+        }
+        if (outcome.status === "mismatch") {
+          console.warn("[optimistic] mismatch", {
+            key,
+            expected: outcome.expected,
+            actual: outcome.actual,
+            txHash: latest.provisional.txHash,
+          });
+        }
+        queryClient.setQueryData<Stamped<T>>(key, outcome.next);
+      };
+      setTimeout(tick, RECONCILE_DELAYS_MS[0]);
+    },
+    [queryClient],
+  );
+
+  const apply = useCallback(
+    (args: {
+      marketId: string;
+      holder: string;
+      snap: OptimisticSnapshot | undefined;
+      ledger: number | null;
+      txHash: string | null;
+      position: (p: Position) => Position;
+      result: WriteResult;
+    }): boolean => {
+      const { marketId, holder, snap, ledger, txHash } = args;
+      // Unknown landing ledger: we cannot reconcile safely, so don't guess.
+      if (ledger === null) return false;
+      const posKey = stellarKeys.position(marketId, holder);
+      const balKey = stellarKeys.balance(holder);
+      const provisional: Provisional = { txHash, ledger, kind: args.result.kind };
+
+      // Base on the snapshot (or a newer provisional, so quick buys stack).
+      const posNow = queryClient.getQueryData<Stamped<Position>>(posKey);
+      const posBase = posNow?.provisional ? posNow : snap?.position ?? posNow;
+      if (posBase) {
+        let next: Position;
+        try {
+          next = args.position(posBase.value);
+        } catch {
+          // Would go negative: the cache was already wrong. Ask the chain.
+          queryClient.invalidateQueries({ queryKey: posKey });
+          return false;
+        }
+        queryClient.setQueryData(posKey, stackProvisional(posBase, next, provisional));
+        scheduleReconcile(posKey, holder, () => readPosition(BigInt(marketId), holder), positionEquals);
+      } else {
+        queryClient.invalidateQueries({ queryKey: posKey });
+      }
+
+      const balNow = queryClient.getQueryData<Stamped<bigint>>(balKey);
+      const balBase = balNow?.provisional ? balNow : snap?.balance ?? balNow;
+      if (balBase) {
+        queryClient.setQueryData(balKey, stackProvisional(balBase, balBase.value + balanceDelta(args.result), provisional));
+        scheduleReconcile(balKey, holder, () => readUsdcBalance(holder), bigintEquals);
+      } else {
+        queryClient.invalidateQueries({ queryKey: balKey });
+      }
+      return true;
+    },
+    [queryClient, scheduleReconcile],
+  );
+
+  return { begin, rollback, apply, address };
+}
+
+/** True when the error happened after submission and the outcome is unknown. */
+function isUnknownOutcome(error: unknown): boolean {
+  if (!(error instanceof UserFacingError)) return false;
+  const d = error.described as { kind?: string; submission?: string };
+  return d.kind === "unknown" || d.submission === "timeout";
 }
 
 /** The RPC's network info, including the Friendbot URL on testnet. */
@@ -480,7 +684,7 @@ function useTxRunner(contract: ContractName) {
       tx: AssembledTransaction<T>,
       parse: (v: xdr.ScVal | undefined) => R,
       onHash?: (hash: string) => void,
-    ): Promise<{ value: R; txHash: string }> => {
+    ): Promise<{ value: R; txHash: string; ledger: number | null }> => {
       const runner = new TxLifecycle<R>({
         server: rpcServer(),
         contract,
@@ -736,10 +940,13 @@ async function fetchTradePreflightInput(marketId: bigint, holder: string, includ
 export function useBuy() {
   const guard = useWriteGuard();
   const invalidate = useInvalidateAfterTrade();
+  const optimistic = useOptimisticTrade();
   const runner = useTxRunner("marketCore");
   const tracker = useTxTracker();
 
   const mutation = useMutation({
+    onMutate: (v: BuyParams & { prepared?: PreparedBuy; collateralIn: bigint }) =>
+      optimistic.begin(String(v.marketId), optimistic.address),
     mutationFn: async ({
       marketId,
       outcome,
@@ -790,10 +997,25 @@ export function useBuy() {
         return (val ? scValToNative(val) : quote) as bigint;
       };
 
-      const { value, txHash } = await runner.start(tx, parse, onHash);
-      return { sharesOut: value, quotedShares: quote, minSharesOut, txHash, holder: signer.publicKey };
+      const { value, txHash, ledger } = await runner.start(tx, parse, onHash);
+      return { sharesOut: value, quotedShares: quote, minSharesOut, txHash, ledger, holder: signer.publicKey };
     },
-    onSuccess: (d, v) => invalidate(String(v.marketId), d.holder),
+    onSuccess: (d, v, snap) => {
+      const applied = optimistic.apply({
+        marketId: String(v.marketId),
+        holder: d.holder,
+        snap,
+        ledger: d.ledger,
+        txHash: d.txHash,
+        position: (p) => applyBuy(p, v.outcome, d.sharesOut),
+        result: { kind: "buy", collateralIn: v.collateralIn },
+      });
+      invalidate(String(v.marketId), d.holder, { skipHolderKeys: applied });
+    },
+    onError: (error, v, snap) => {
+      if (isUnknownOutcome(error) && optimistic.address) invalidate(String(v.marketId), optimistic.address);
+      else optimistic.rollback(String(v.marketId), optimistic.address, snap);
+    },
   });
 
   return {
@@ -812,10 +1034,12 @@ export type SellParams = {
 export function useSell() {
   const guard = useWriteGuard();
   const invalidate = useInvalidateAfterTrade();
+  const optimistic = useOptimisticTrade();
   const runner = useTxRunner("marketCore");
   const tracker = useTxTracker();
 
   const mutation = useMutation({
+    onMutate: (v: SellParams) => optimistic.begin(String(v.marketId), optimistic.address),
     mutationFn: async ({ marketId, outcome, shares, slippageBps }: SellParams) => {
       const signer = guard();
       await requireUsdcTrustline(signer.publicKey);
@@ -951,10 +1175,25 @@ export function useSell() {
         return (val ? scValToNative(val) : shares) as bigint;
       };
 
-      const { value, txHash } = await runner.start(tx, parse, onHash);
-      return { sharesSold: value, collateralOut, maxSharesIn, txHash, holder: signer.publicKey };
+      const { value, txHash, ledger } = await runner.start(tx, parse, onHash);
+      return { sharesSold: value, collateralOut: confirmed.collateralOut, maxSharesIn, txHash, ledger, holder: signer.publicKey };
     },
-    onSuccess: (d, v) => invalidate(String(v.marketId), d.holder),
+    onSuccess: (d, v, snap) => {
+      const applied = optimistic.apply({
+        marketId: String(v.marketId),
+        holder: d.holder,
+        snap,
+        ledger: d.ledger,
+        txHash: d.txHash,
+        position: (p) => applySell(p, v.outcome, d.sharesSold),
+        result: { kind: "sell", collateralOut: d.collateralOut },
+      });
+      invalidate(String(v.marketId), d.holder, { skipHolderKeys: applied });
+    },
+    onError: (error, v, snap) => {
+      if (isUnknownOutcome(error) && optimistic.address) invalidate(String(v.marketId), optimistic.address);
+      else optimistic.rollback(String(v.marketId), optimistic.address, snap);
+    },
   });
 
   return {
@@ -966,10 +1205,12 @@ export function useSell() {
 export function useRedeem() {
   const guard = useWriteGuard();
   const invalidate = useInvalidateAfterTrade();
+  const optimistic = useOptimisticTrade();
   const runner = useTxRunner("marketCore");
   const tracker = useTxTracker();
 
   const mutation = useMutation({
+    onMutate: (v: { marketId: bigint | string }) => optimistic.begin(String(v.marketId), optimistic.address),
     mutationFn: async ({ marketId }: { marketId: bigint | string }) => {
       const signer = guard();
       const tx = await marketCore(signer).redeem({ holder: signer.publicKey, market_id: toId(marketId) });
@@ -989,10 +1230,26 @@ export function useRedeem() {
         return (val ? scValToNative(val) : 0n) as bigint;
       };
 
-      const { value, txHash } = await runner.start(tx, parse, onHash);
-      return { payout: value, txHash, holder: signer.publicKey };
+      const { value, txHash, ledger } = await runner.start(tx, parse, onHash);
+      return { payout: value, txHash, ledger, holder: signer.publicKey };
     },
-    onSuccess: (d, v) => invalidate(String(v.marketId), d.holder),
+    onSuccess: (d, v, snap) => {
+      // A losing redeem pays 0n but still zeroes the position.
+      const applied = optimistic.apply({
+        marketId: String(v.marketId),
+        holder: d.holder,
+        snap,
+        ledger: d.ledger,
+        txHash: d.txHash,
+        position: () => applyRedeem(),
+        result: { kind: "redeem", payout: d.payout },
+      });
+      invalidate(String(v.marketId), d.holder, { skipHolderKeys: applied });
+    },
+    onError: (error, v, snap) => {
+      if (isUnknownOutcome(error) && optimistic.address) invalidate(String(v.marketId), optimistic.address);
+      else optimistic.rollback(String(v.marketId), optimistic.address, snap);
+    },
   });
 
   return {

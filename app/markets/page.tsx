@@ -1,15 +1,16 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import React, { useState } from "react";
+import { motion, AnimatePresence, MotionConfig } from "framer-motion";
 import Link from "next/link";
-import { io } from "socket.io-client";
 import { useMarkets } from "@/lib/hooks/useMarkets";
 import { useOnChainMarket, useOnChainMarkets, type OnChainMarketView } from "@/lib/hooks/useStellar";
 import type { Market, MarketStatus, MarketTracePreview } from "@/lib/api/markets";
 import { BACKEND_CATEGORIES, BACKEND_CATEGORY_LABELS } from "@/lib/stellar/categories";
 import { formatUsdc } from "@/lib/stellar/units";
-import { API_URL } from "@/lib/api/client";
+import { useBurstFeed } from "@/lib/realtime/useBurst";
+import { FeedProfiler } from "@/lib/realtime/FeedProfiler";
+import type { TradeExecutedPayload } from "@/lib/realtime/RealtimeProvider";
 
 /** Where a displayed value came from, wherever backend and chain can disagree. */
 const SourceTag = ({ source }: { source: "chain" | "backend" }) => (
@@ -194,40 +195,27 @@ interface FeedRow {
 }
 
 /** Payload of the backend's TRADE_EXECUTED socket event (docs/api.md). */
-interface TradeExecutedEvent {
-  eventId: string;
-  onChainMarketId: string;
-  marketQuestion: string | null;
-  direction: "YES" | "NO";
-  isBuy: boolean;
-  collateralRaw: string;
-  priceYesBps: number;
-}
+const tradeToRow = (data: TradeExecutedPayload): FeedRow => ({
+  key: `trade:${data.eventId}`,
+  // Receipt time: the socket payload has a ledger but no close time.
+  time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
+  market: data.marketQuestion || `Market #${data.onChainMarketId}`,
+  size: `$${formatUsdc(BigInt(data.collateralRaw), { maxDecimals: 2, grouping: true })}`,
+  bet: `${data.isBuy ? "" : "SELL "}${data.direction}`,
+  prob: `YES ${(data.priceYesBps / 100).toFixed(1)}%`,
+  color: data.direction === "YES" ? "text-secondary" : "text-tertiary",
+});
+const rowKey = (row: FeedRow) => row.key;
 
 const TradingFeed = () => {
-  const [feed, setFeed] = useState<FeedRow[]>([]);
-
-  useEffect(() => {
-    const socket = io(API_URL.replace(/\/api\/v1\/?$/, ""));
-
-    socket.on("TRADE_EXECUTED", (data: TradeExecutedEvent) => {
-      const time = new Date().toLocaleTimeString('en-GB', { hour12: false });
-      const newEntry: FeedRow = {
-        key: data.eventId,
-        time,
-        market: data.marketQuestion || `Market #${data.onChainMarketId}`,
-        size: `$${formatUsdc(BigInt(data.collateralRaw), { maxDecimals: 2, grouping: true })}`,
-        bet: `${data.isBuy ? "" : "SELL "}${data.direction}`,
-        prob: `YES ${(data.priceYesBps / 100).toFixed(1)}%`,
-        color: data.direction === "YES" ? "text-secondary" : "text-tertiary",
-      };
-      setFeed(prev => [newEntry, ...prev.slice(0, 7)]);
-    });
-
-    return () => {
-      socket.disconnect();
-    };
-  }, []);
+  const { rows: feed, burst, hiddenOverflow, instantKey } = useBurstFeed("TRADE_EXECUTED", {
+    capacity: 8,
+    toRow: tradeToRow,
+    key: rowKey,
+  });
+  // A burst or a catch-up batch remounts the tbody so rows appear without
+  // per-row enter/exit animations (initial={false} only applies on mount).
+  const instant = burst !== null || hiddenOverflow > 0;
 
   return (
     <section className="mt-12">
@@ -235,6 +223,7 @@ const TradingFeed = () => {
         <span className="material-symbols-outlined text-primary">analytics</span>
         <h2 className="font-headline-sm text-headline-sm uppercase tracking-tight">Real-time Trading Feed</h2>
       </div>
+      <MotionConfig reducedMotion="user">
       <div className="terminal-log-flow border border-outline-variant rounded-xl overflow-hidden bg-white">
         <div className="p-4 overflow-x-auto">
           <table className="w-full text-left">
@@ -247,7 +236,21 @@ const TradingFeed = () => {
                 <th className="pb-3 text-label-caps text-on-surface-variant text-right">Probability</th>
               </tr>
             </thead>
-            <tbody className="font-data-mono text-body-md">
+            <tbody key={instantKey} className="font-data-mono text-body-md">
+              {burst && (
+                <tr>
+                  <td colSpan={5} className="py-2 text-on-surface-variant text-xs" role="status">
+                    {burst.count} trades in the last second
+                  </td>
+                </tr>
+              )}
+              {hiddenOverflow > 0 && (
+                <tr>
+                  <td colSpan={5} className="py-2 text-on-surface-variant text-xs" role="status">
+                    {hiddenOverflow} more events while this tab was hidden
+                  </td>
+                </tr>
+              )}
               <AnimatePresence initial={false}>
                 {feed.length === 0 && (
                   <tr>
@@ -257,9 +260,9 @@ const TradingFeed = () => {
                 {feed.map((row) => (
                   <motion.tr 
                     key={row.key}
-                    initial={{ opacity: 0, x: -20 }}
+                    initial={instant ? false : { opacity: 0, x: -20 }}
                     animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 20 }}
+                    exit={instant ? undefined : { opacity: 0, x: 20 }}
                     className="hover:bg-surface-container transition-colors border-b border-outline-variant/30"
                   >
                     <td className="py-3 text-on-surface-variant">{row.time}</td>
@@ -274,6 +277,7 @@ const TradingFeed = () => {
           </table>
         </div>
       </div>
+      </MotionConfig>
     </section>
   );
 };
@@ -376,7 +380,7 @@ export default function Markets() {
 
         <OnChainOnlyMarkets knownIds={knownIds} />
 
-        <TradingFeed />
+        <FeedProfiler id="TradingFeed"><TradingFeed /></FeedProfiler>
       </main>
     </div>
   );

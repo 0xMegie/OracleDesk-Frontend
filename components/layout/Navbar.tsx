@@ -4,9 +4,11 @@ import React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import WalletDropdown from "./WalletDropdown";
+import { useInbox } from "@/lib/notifications/InboxProvider";
 
 const Navbar = () => {
   const pathname = usePathname();
+  const { unread } = useInbox();
 
   const navLinks = [
     { 
@@ -94,14 +96,22 @@ const Navbar = () => {
           </nav>
         </div>
         <div className="flex items-center gap-4">
-          <Link 
+          <Link
             href="/notifications"
-            className={`material-symbols-outlined ${
+            aria-label={unread ? `Notifications, ${unread} unread` : "Notifications"}
+            className={`${
               pathname === "/notifications" ? "text-primary" : "text-on-surface-variant"
             } hover:text-primary transition-colors cursor-pointer relative pt-1`}
           >
-            notifications
-            <span className="absolute top-0 right-0 w-2 h-2 bg-tertiary rounded-full border border-white"></span>
+            <span className="material-symbols-outlined" aria-hidden="true">notifications</span>
+            {unread > 0 && (
+              <span
+                aria-hidden="true"
+                className="absolute -top-1 -right-2 min-w-[18px] h-[18px] px-1 bg-tertiary text-white text-[10px] font-bold leading-[18px] text-center rounded-full border border-white"
+              >
+                {unread > 99 ? "99+" : unread}
+              </span>
+            )}
           </Link>
           
           <WalletDropdown />
