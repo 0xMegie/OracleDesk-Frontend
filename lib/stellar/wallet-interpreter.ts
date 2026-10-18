@@ -6,6 +6,7 @@
  */
 import { transition, initialWalletState, type WalletEffect, type WalletEvent, type WalletState } from "./wallet-machine";
 import type { WalletKitAdapter } from "./wallet-kit-adapter";
+import type { SyncMessage } from "@/lib/api/cross-tab-sync";
 
 export interface WalletInterpreterDeps {
   /** Loads the kit. Called once, on start (browser only). */
@@ -18,6 +19,8 @@ export interface WalletInterpreterDeps {
   navigate: (to: string) => void;
   /** Turns a thrown value into a plain message. */
   describe: (err: unknown) => { kind: string; message: string };
+  /** Tells other tabs that this tab's wallet disconnected. */
+  broadcastDisconnect: () => void;
 }
 
 export class WalletInterpreter {
@@ -57,7 +60,10 @@ export class WalletInterpreter {
               storedSessionWallet: this.deps.storedSessionWallet(),
             }),
           ),
-          kit.onDisconnect(() => this.send({ type: "KIT_DISCONNECTED" })),
+          kit.onDisconnect(() => {
+            this.deps.broadcastDisconnect();
+            this.send({ type: "KIT_DISCONNECTED" });
+          }),
         ];
         this.send({ type: "KIT_LOADED" });
       },
@@ -78,6 +84,26 @@ export class WalletInterpreter {
     this.state = next.state;
     this.listeners.forEach((fn) => fn());
     for (const effect of next.effects) this.run(effect);
+  };
+
+  /**
+   * Applies a change made in another tab. These never broadcast back, so two
+   * tabs cannot ping-pong messages.
+   */
+  applyCrossTab = (msg: SyncMessage): void => {
+    switch (msg.type) {
+      case "wallet_disconnected":
+        this.send({ type: "KIT_DISCONNECTED" });
+        return;
+      case "wallet_changed":
+        if (msg.address && msg.address !== this.deps.storedSessionWallet()) {
+          this.send({ type: "KIT_STATE_UPDATED", address: msg.address, passphrase: null, storedSessionWallet: this.deps.storedSessionWallet() });
+        }
+        return;
+      case "auth_session_changed":
+        this.send({ type: "SESSION_SYNCED", wallet: msg.address || this.deps.storedSessionWallet() });
+        return;
+    }
   };
 
   /** Resolves once the backend session is established for the current account. */

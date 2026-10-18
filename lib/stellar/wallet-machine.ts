@@ -56,6 +56,8 @@ export type WalletEvent =
   | { type: "NETWORK_REPORTED"; epoch: number; address: string; passphrase: string | null }
   | { type: "KIT_STATE_UPDATED"; address: string | null; passphrase: string | null; storedSessionWallet: string | null }
   | { type: "KIT_DISCONNECTED" }
+  /** Another tab issued or cleared the backend session for `wallet`. */
+  | { type: "SESSION_SYNCED"; wallet: string | null }
   | { type: "ENSURE_SESSION" }
   | { type: "SIGNIN_SUCCEEDED"; epoch: number; attempt: number; wallet: string }
   | { type: "SIGNIN_FAILED"; epoch: number; attempt: number; message: string }
@@ -230,6 +232,11 @@ export function transition(s: WalletState, e: WalletEvent): Transition {
         { type: "resolveConnect", ok: false },
       ];
       return { state: { tag: "disconnected", epoch, error: null }, effects };
+    }
+
+    case "SESSION_SYNCED": {
+      if (s.tag !== "connected") return stay(s);
+      return stay({ ...s, session: e.wallet === s.address ? sessionFor(e.wallet) : null });
     }
 
     case "ENSURE_SESSION": {

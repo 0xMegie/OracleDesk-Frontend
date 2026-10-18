@@ -4,6 +4,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyn
 import { useRouter } from "next/navigation";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { clearAuthSession, getStoredSessionWallet, signInWithWallet } from "@/lib/api/auth";
+import { broadcastWalletDisconnect, createCrossTabSync } from "@/lib/api/cross-tab-sync";
 import { safeReturnTo } from "@/lib/navigation";
 import { NETWORK_PASSPHRASE } from "./config";
 import { describeError, UserFacingError } from "./errors";
@@ -91,12 +92,19 @@ export function WalletProvider({ children, kitLoader = loadStellarWalletsKit }: 
         purgeStellarQueries: () => queryClient.removeQueries({ queryKey: ["stellar"] }),
         navigate: (to) => routerRef.current.replace(to),
         describe: (err) => describeError(err),
+        broadcastDisconnect: broadcastWalletDisconnect,
       }),
   );
 
   // Starts the kit, restores a session the kit persisted (never redirects or
   // prompts), and tears the kit subscriptions down on unmount.
   useEffect(() => interpreter.start(), [interpreter]);
+
+  // Changes made in another tab (disconnect, account switch, login) reach this tab.
+  useEffect(() => {
+    const sync = createCrossTabSync((msg) => interpreter.applyCrossTab(msg));
+    return () => sync.unsubscribe();
+  }, [interpreter]);
 
   const state = useSyncExternalStore(interpreter.subscribe, interpreter.getState, interpreter.getState);
   const view = useMemo(() => viewOf(state), [state]);
