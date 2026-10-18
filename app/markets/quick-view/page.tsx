@@ -23,6 +23,7 @@ import type { TxPhase } from "@/lib/stellar/tx-lifecycle";
 import { preflightBuy } from "@/lib/stellar/preflight";
 import { useLedgerNow as useLedgerClock } from "@/lib/stellar/ledger-clock";
 import { MIN_TX_TIMEOUT_S, SAFETY_MARGIN_S } from "@/lib/stellar/deadline";
+import { TradeTape } from "@/components/market/trade-tape";
 import { PendingValue } from "@/components/pending-value";
 
 const SLIPPAGE_BPS = 100; // 1%
@@ -545,6 +546,8 @@ function MarketQuickViewContent() {
                     )}
                   </div>
                 )}
+
+                {onChainMarketId !== null && <TradeTape onChainMarketId={onChainMarketId} limit={20} compact />}
 
                 {/* AI Reasoning Snippet */}
                 <div className="bg-[#f0f9fa] border border-primary-container/20 p-4 rounded-lg space-y-2 relative overflow-hidden">
