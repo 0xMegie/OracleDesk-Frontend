@@ -1,219 +1,68 @@
 "use client";
 
-import React, { useState, useEffect, useMemo } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
-import { io } from "socket.io-client";
-import { usePositions } from "@/lib/hooks/usePortfolio";
-import { API_URL } from "@/lib/api/client";
-import { explorerTx } from "@/lib/stellar/config";
+import { useInbox } from "@/lib/notifications/InboxProvider";
+import type { InboxItem } from "@/lib/notifications/store";
+import { useWallet } from "@/lib/contexts/WalletContext";
+import { explorerTx, NETWORK_LABEL } from "@/lib/stellar/config";
 import { formatUsdc } from "@/lib/stellar/units";
 
-type NotificationType = "all" | "critical" | "trading" | "ai";
-
-interface NotificationItem {
-  id: string;
-  type: Exclude<NotificationType, "all">;
-  title: string;
-  message: string;
-  time: string;
-  timestamp: number;
-  payout?: string;
-  txHash?: string;
-  probability?: number;
-  icon: string;
-  iconBg: string;
-  iconColor: string;
-  borderColor: string;
+type Filter = "all" | "trades" | "redemptions" | "reasoning" | "transactions";
+const group = (item: InboxItem): Exclude<Filter, "all"> => item.kind === "fill" ? "trades" : item.kind === "trace" ? "reasoning" : item.kind === "redeemable" || item.kind === "redeemed" ? "redemptions" : "transactions";
+const labels: Record<Filter, string> = { all: "All", trades: "Trades", redemptions: "Redemptions", reasoning: "Reasoning", transactions: "Transactions" };
+const title: Record<InboxItem["kind"], string> = { fill: "Trade confirmed", redeemable: "Ready to redeem", redeemed: "Shares redeemed", trace: "New market reasoning", "tx-failed": "Transaction failed", "tx-pending": "Transaction pending" };
+function message(item: InboxItem) {
+  const d = item.data;
+  switch (item.kind) {
+    case "fill": return `${d.action} ${formatUsdc(BigInt(d.sharesRaw), { maxDecimals: 2 })} ${d.direction} shares for ${formatUsdc(BigInt(d.collateralRaw), { maxDecimals: 7, grouping: true })} USDC.`;
+    case "redeemable": return `Market #${item.marketId} ${d.outcome === "Void" ? "was voided" : `resolved ${d.outcome}`}. Review your payout and redeem your shares.`;
+    case "redeemed": return `${formatUsdc(BigInt(d.payoutRaw), { maxDecimals: 7, grouping: true })} USDC paid to your wallet.`;
+    case "trace": return `New reasoning on market #${item.marketId}: ${d.action}.`;
+    default: return `${d.action}: ${d.message}`;
+  }
 }
-
-
 export default function NotificationsPage() {
-  const [filter, setFilter] = useState<NotificationType>("all");
-  const [liveNotifications, setLiveNotifications] = useState<NotificationItem[]>([]);
-  const [clearedBefore, setClearedBefore] = useState(0);
-  const { data: positionsData } = usePositions({ limit: 10 });
-
-  // Positions become notifications; live socket events are added on top.
-  const localNotifications = useMemo(() => {
-      const positionNotifications: NotificationItem[] = (positionsData?.positions ?? []).map(pos => ({
-        id: `pos-${pos.id}`,
-        type: "trading",
-        title: "Trade Confirmed",
-        message: `${pos.status === 'CLOSED' ? 'Closed' : 'Opened'} ${pos.direction} position on "${pos.market.question}" for ${pos.size.toLocaleString()} USDC.`,
-        time: new Date(pos.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        timestamp: new Date(pos.createdAt).getTime(),
-        txHash: pos.trade?.txHash || undefined,
-        icon: pos.status === 'CLOSED' ? "history" : "check_circle",
-        iconBg: "bg-secondary-fixed",
-        iconColor: "text-secondary",
-        borderColor: "border-l-secondary",
-      }));
-
-      return [...liveNotifications, ...positionNotifications]
-        .filter(n => n.timestamp > clearedBefore)
-        .sort((a, b) => b.timestamp - a.timestamp);
-  }, [positionsData, liveNotifications, clearedBefore]);
-
-  // Socket listener for real-time trades
-  useEffect(() => {
-    const socket = io(API_URL.replace(/\/api\/v1\/?$/, ""));
-
-    // Payload documented in docs/api.md (Realtime).
-    socket.on("TRADE_EXECUTED", (data: { eventId: string; direction: string; isBuy: boolean; onChainMarketId: string; marketQuestion: string | null; collateralRaw: string; txHash: string }) => {
-      const newNotif: NotificationItem = {
-        id: `socket-${data.eventId}`,
-        type: "trading",
-        title: "New Trade Executed",
-        message: `${data.isBuy ? "Bought" : "Sold"} ${data.direction} on ${data.marketQuestion ? `"${data.marketQuestion}"` : `market #${data.onChainMarketId}`} for ${formatUsdc(BigInt(data.collateralRaw), { maxDecimals: 2, grouping: true })} USDC.`,
-        time: "Just now",
-        timestamp: Date.now(),
-        txHash: data.txHash,
-        icon: "bolt",
-        iconBg: "bg-secondary-fixed",
-        iconColor: "text-secondary",
-        borderColor: "border-l-secondary",
-      };
-      setLiveNotifications(prev => [newNotif, ...prev]);
-    });
-
-    return () => {
-      socket.disconnect();
-    };
-  }, []);
-
-  const filteredNotifications = localNotifications.filter(
-    (item) => filter === "all" || item.type === filter
-  );
-
-  const filterButtons = [
-    { label: "All Notifications", type: "all" as const, icon: "dashboard", count: localNotifications.length },
-    { label: "Critical", type: "critical" as const, icon: "warning", count: localNotifications.filter(n => n.type === 'critical').length },
-    { label: "Trading", type: "trading" as const, icon: "payments", count: localNotifications.filter(n => n.type === 'trading').length },
-    { label: "AI Signals", type: "ai" as const, icon: "psychology", count: localNotifications.filter(n => n.type === 'ai').length },
-  ];
-
-  return (
-    <main className="flex-grow pt-8 pb-12 px-gutter max-w-container-max-width mx-auto w-full">
-      <div className="grid grid-cols-12 gap-6">
-        {/* Left Column: Filter and Summary */}
-        <div className="col-span-12 lg:col-span-3 space-y-6">
-          <div className="bg-surface-container-lowest border border-outline-variant p-4 rounded shadow-sm">
-            <h2 className="font-headline-sm text-headline-sm mb-4">Activity</h2>
-            <div className="space-y-1">
-              {filterButtons.map((btn) => (
-                <button
-                  key={btn.type}
-                  onClick={() => setFilter(btn.type)}
-                  className={`w-full flex items-center justify-between p-2 rounded transition-all duration-200 cursor-pointer ${
-                    filter === btn.type
-                      ? "text-primary bg-surface-container-low font-bold"
-                      : "text-on-surface-variant hover:bg-surface-container"
-                  }`}
-                >
-                  <span className="flex items-center gap-2">
-                    <span className={`material-symbols-outlined text-[20px] ${
-                      btn.type === 'critical' ? 'text-tertiary' : 
-                      btn.type === 'trading' ? 'text-secondary' : 
-                      btn.type === 'ai' ? 'text-primary' : ''
-                    }`}>
-                      {btn.icon}
-                    </span>
-                    {btn.label}
-                  </span>
-                  <span className="text-xs bg-surface-container-high px-2 py-0.5 rounded-full">
-                    {btn.count}
-                  </span>
-                </button>
-              ))}
-            </div>
+  const inbox = useInbox();
+  const { address, openModal, isConnecting } = useWallet();
+  const [filter, setFilter] = useState<Filter>("all");
+  const counts = useMemo(() => {
+    const next: Record<Filter, number> = { all: inbox.items.length, trades: 0, redemptions: 0, reasoning: 0, transactions: 0 };
+    inbox.items.forEach(item => next[group(item)]++);
+    return next;
+  }, [inbox.items]);
+  const items = inbox.items.filter(item => filter === "all" || group(item) === filter);
+  return <main className="flex-grow py-8 px-gutter max-w-container-max-width mx-auto w-full">
+    <div className="flex flex-wrap gap-4 justify-between items-center mb-6">
+      <div><h1 className="font-headline-md text-headline-md">Notifications</h1><p className="text-sm text-on-surface-variant mt-1">Your wallet activity on {NETWORK_LABEL}.</p></div>
+      {address && <button type="button" onClick={() => void inbox.markAllRead()} disabled={!inbox.unread} className="text-primary text-sm underline disabled:opacity-50">Mark all read</button>}
+    </div>
+    {!address ? <section className="border border-outline-variant rounded-lg p-8 bg-surface-container-lowest">
+      <h2 className="font-headline-sm text-headline-sm mb-2">Connect to see your inbox</h2>
+      <p className="text-on-surface-variant text-sm mb-4">Your fills, redemptions, pending transactions, and reasoning on markets you hold appear here.</p>
+      <button onClick={() => void openModal()} disabled={isConnecting} className="px-4 py-2 bg-primary text-primary-foreground rounded-lg disabled:opacity-50">{isConnecting ? "Connecting…" : "Connect wallet"}</button>
+    </section> : <div className="grid gap-6 md:grid-cols-[220px_minmax(0,1fr)]">
+      <aside>
+        <nav aria-label="Notification filters" className="space-y-1">{(Object.keys(labels) as Filter[]).map(key => <button key={key} aria-pressed={filter === key} onClick={() => setFilter(key)} className={`w-full flex justify-between text-sm p-3 rounded ${key === filter ? "bg-surface-container-high text-primary font-bold" : "text-on-surface-variant hover:bg-surface-container"}`}><span>{labels[key]}</span><span>{counts[key]}</span></button>)}</nav>
+        <p className="text-xs text-on-surface-variant leading-relaxed mt-6">Only your wallet&apos;s activity is shown. Read state is saved in this browser for this address and network. Showing the newest 200 items; up to 500 are saved.</p>
+      </aside>
+      <section aria-label="Wallet inbox" className="space-y-3">
+        {inbox.status === "memory" && <p role="status" className="p-3 border border-outline-variant text-sm">Notifications won&apos;t be saved in this browser.</p>}
+        {inbox.error && <p role="status" className="text-error text-sm">{inbox.error} Retrying while this tab is visible.</p>}
+        {inbox.burst && <p className="text-xs text-on-surface-variant">{inbox.burst.count} network events received in a batch.{inbox.burst.overflow > 0 && ` ${inbox.burst.overflow} more events while this tab was hidden; open a market to refresh its history.`}</p>}
+        {inbox.status === "loading" && <div role="status" className="p-6 bg-surface-container-low motion-safe:animate-pulse">Loading your inbox…</div>}
+        {inbox.status !== "loading" && items.length === 0 && <p className="p-8 border border-dashed border-outline-variant rounded-lg text-sm text-on-surface-variant">No {filter === "all" ? "notifications" : labels[filter].toLowerCase()} yet. Your wallet&apos;s next activity will appear here.</p>}
+        {items.map(item => <article key={item.id} className={`border rounded-lg p-4 ${item.readAt === null ? "border-primary bg-surface-container-lowest" : "border-outline-variant bg-surface"}`}>
+          <div className="flex flex-wrap justify-between gap-2"><h2 className="font-bold text-sm">{title[item.kind]}{item.readAt === null && <span className="text-primary text-xs ml-2">Unread</span>}</h2><time dateTime={new Date(item.createdAt).toISOString()} className="text-xs text-on-surface-variant">{new Date(item.createdAt).toLocaleString()}</time></div>
+          <p className="text-sm mt-2">{message(item)}</p>
+          <div className="flex flex-wrap gap-4 mt-3 text-xs text-primary">
+            {item.marketId && <Link className="underline" href={`/markets/quick-view?onChainId=${item.marketId}`}>View market #{item.marketId}</Link>}
+            {item.kind === "trace" && item.data.traceId && <Link className="underline" href={`/reasoning/detail?traceId=${encodeURIComponent(item.data.traceId)}`}>Read reasoning</Link>}
+            {item.txHash && <a className="underline" href={explorerTx(item.txHash)} target="_blank" rel="noreferrer">View transaction</a>}
+            {item.readAt === null && <button type="button" onClick={() => void inbox.markRead([item.id])} className="underline">Mark read</button>}
           </div>
-          <div className="bg-surface-container-low border border-outline-variant p-4 rounded bg-gradient-to-br from-[#f0f9fa] to-[#e0f2f4]">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="material-symbols-outlined text-primary" style={{ fontVariationSettings: "'FILL' 1" }}>
-                auto_awesome
-              </span>
-              <span className="font-label-caps text-label-caps text-primary">ORACLE INSIGHT</span>
-            </div>
-            <p className="text-body-md text-on-surface-variant leading-relaxed italic">
-              Live trades from the OracleDesk contracts on Stellar Testnet, plus agent positions.
-            </p>
-          </div>
-        </div>
-
-        {/* Middle Column: Main Feed */}
-        <div className="col-span-12 lg:col-span-9 space-y-4">
-          <div className="flex justify-between items-center mb-2">
-            <h1 className="font-headline-md text-headline-md">Alert Center</h1>
-            <button 
-              onClick={() => { setLiveNotifications([]); setClearedBefore(Date.now()); }}
-              className="text-primary font-label-caps text-label-caps hover:underline cursor-pointer"
-            >
-              Clear all
-            </button>
-          </div>
-
-          <div className="space-y-3">
-            {filteredNotifications.map((item) => (
-              <div
-                key={item.id}
-                className={`group bg-surface-container-lowest border-l-4 ${item.borderColor} border-y border-r border-outline-variant p-4 rounded-r flex gap-4 hover:bg-white hover:translate-x-1 transition-all duration-200 cursor-pointer shadow-sm`}
-              >
-                <div className={`flex-shrink-0 w-10 h-10 rounded-full ${item.iconBg} flex items-center justify-center`}>
-                  <span className={`material-symbols-outlined ${item.iconColor}`}>
-                    {item.icon}
-                  </span>
-                </div>
-                <div className="flex-grow">
-                  <div className="flex justify-between items-start">
-                    <h3 className={`font-headline-sm text-headline-sm ${item.iconColor}`}>
-                      {item.title}
-                    </h3>
-                    <span className="font-data-mono text-data-mono text-on-surface-variant text-[12px]">
-                      {item.time}
-                    </span>
-                  </div>
-                  <p className="text-body-md mt-1 text-on-surface">
-                    {item.message}
-                  </p>
-                  
-                  {item.probability !== undefined && (
-                    <div className="mt-3">
-                      <div className="w-full bg-surface-container h-1 rounded overflow-hidden">
-                        <div 
-                          className="bg-primary h-full transition-all duration-1000" 
-                          style={{ width: `${item.probability}%` }}
-                        ></div>
-                      </div>
-                    </div>
-                  )}
-
-                  {item.txHash && (
-                    <a 
-                      href={explorerTx(item.txHash)} 
-                      target="_blank" 
-                      rel="noopener noreferrer"
-                      className="mt-2 inline-flex items-center gap-2 hover:opacity-80 transition-opacity"
-                    >
-                      <span className="text-xs font-data-mono bg-surface-container px-2 py-0.5 rounded text-on-surface-variant">
-                        TX: {item.txHash.substring(0, 10)}...
-                      </span>
-                      <span className="material-symbols-outlined text-xs text-primary">
-                        open_in_new
-                      </span>
-                    </a>
-                  )}
-                </div>
-              </div>
-            ))}
-            
-            {filteredNotifications.length === 0 && (
-              <div className="text-center py-12 bg-white border border-dashed border-outline-variant rounded-lg">
-                <p className="text-on-surface-variant">No active alerts. Monitoring the network...</p>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </main>
-  );
+        </article>)}
+      </section>
+    </div>}
+  </main>;
 }

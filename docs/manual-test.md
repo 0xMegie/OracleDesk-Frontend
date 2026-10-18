@@ -125,3 +125,47 @@ To try the same on market 0 (resolved): the buy button is disabled and the panel
 - [ ] `/copy-trade?marketId=<backend market id>&traceId=<trace id>`: the side comes from the trace's edge. With no trace or zero edge the confirm button is disabled and the page explains why.
 - [ ] `/admin` with an address not in `NEXT_PUBLIC_ADMIN_ADDRESSES` shows "Access Denied".
 - [ ] `/tx?hash=<64-hex>` inspects live ledger state and fee charged for any testnet transaction, falling back cleanly to Stellar Expert when outside RPC retention.
+# Wallet reconciliation, market tape and inbox (#39–#42)
+
+1. Connect a testnet wallet with XLM, a USDC trustline and test USDC. Open an
+   **open** on-chain market in quick-view; record its position and the wallet
+   dropdown balance. Buy, then confirm that contract-returned shares and
+   deducted collateral appear with a transaction link and pending indicator.
+   Matching reads clear the indicator. Repeat with a sell and a redemption,
+   including a losing-side redemption with zero payout. Reject a signature
+   and confirm both values remain unchanged. Make two consecutive buys and
+   check that the second composes with the first. Disconnect while the RPC
+   lags and verify the previous wallet's values do not reappear.
+2. Open the same quick-view without a wallet. Its **Recent trades** table
+   reads only that market's contract events. Check bigint USDC, shares, fee,
+   YES price and movement against explorer events. Check trader/transaction
+   links, including a contract trader. Send a trade on that market and check
+   one live row appears; a later RPC refetch must replace it without a
+   duplicate. A trade on a different market must not appear. Load older
+   rows until the retention notice appears. With 2,000 fixture rows, verify
+   fewer than 60 DOM rows and scroll to the oldest row.
+3. Use wallets A and B in separate browser profiles. Trade as A; only A's
+   **Notifications** page should receive a fill and increase the bell count.
+   Mark it read explicitly, reload, and verify that it remains read. Switch
+   wallets in the same browser and verify no previous-owner items flash.
+   Disconnect: show the connect prompt and an empty bell. Check testnet and
+   mainnet scopes separately if testing a second network build.
+4. Publish reasoning on a market A holds and one it does not hold. Only the
+   held market creates a reasoning item. Resolve or void a held seeded
+   market; within a visible 60-second poll, a redeemable item links to it.
+   Redeem and check the exact payout item. Reload with an already-resolved
+   held market to check current-status detection outside event retention.
+   Submit a transaction that remains pending or fails and verify its tracker
+   item. Rejected signatures must not create submitted-transaction items.
+5. Block IndexedDB in browser settings and reconnect. The inbox should work
+   in memory and show **Notifications won't be saved in this browser**.
+   Generate more than 500 items: read items should be pruned first and only
+   the newest 200 should render. Nothing becomes read merely by rendering.
+6. Run the simulator in CONTRIBUTING.md at 500/s and 50/s. Check feed bounds,
+   a single burst summary, responsiveness and no console exceptions. Hide
+   the tab during a burst, return, and check one catch-up and overflow notice
+   instead of replayed animations. Enable OS reduced motion: ticker, pulse
+   indicators and incoming trade rows must remain static.
+
+These wallet-signing steps require a browser wallet and funded test account;
+the automated suite does not submit financial transactions.

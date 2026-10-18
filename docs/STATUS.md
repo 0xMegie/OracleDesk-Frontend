@@ -1,6 +1,66 @@
 # Status
 
-Last updated: 2026-10-07. This is the honest account of the frontend's Stellar port: what works, what isn't verified, and what a human has to decide. "Verified" means a command was run and its output observed in the session that wrote this file. The backend's [docs/STATUS.md](https://github.com/OracleDesk/OracleDesk-Backend/blob/main/docs/STATUS.md) covers the server side.
+Last updated: 2026-10-18. The latest issue verification is below; the original Stellar port record follows it. "Verified" means a command was run and its output observed in the session that wrote this file. The backend's [docs/STATUS.md](https://github.com/OracleDesk/OracleDesk-Backend/blob/main/docs/STATUS.md) covers the server side.
+
+## Wallet activity issues #39–#42 (2026-10-18)
+
+- #39: confirmed bigint position/balance deltas, ledger guards, reconciliation,
+  pending/awaiting-RPC labels and transaction links.
+- #40: contract-spec Trade filters/decoding, backward window probing, cursor
+  pagination, live deduplication, retention notices and a bounded virtual tape.
+- #41: shared socket delivery once per frame, bounded catch-up, rolling burst
+  summaries, static burst rows, memoized home rows and reduced motion.
+- #42: address/network-scoped IndexedDB inbox, explicit persisted read state,
+  own-wallet classification, resolution/redemption polling and a real bell count.
+
+Validation: `check:bindings`, `typecheck`, `lint`, `test` and `build` pass.
+The suite has 176 tests across 25 files; lint reports 31 existing warnings and
+no errors. Production prerender still reports the existing Recharts container
+size warnings. Baseline merge defects in trading-hook imports, SDK 16 trustline
+calls, ledger-clock RPC access, transaction review and tracker polling were
+repaired because these paths are required by the four issues.
+The lockfile also includes the wallet kit's peer dependency tree, so plain
+`npm ci` can validate and install it without `--legacy-peer-deps`.
+Clean installation succeeds. npm reports 69 dependency advisories (18 low,
+16 moderate, 30 high, 5 critical); dependency security upgrades are outside
+these four issues and were not applied.
+
+Browser checks in headless Chrome (1440×1100): the actual app rendered both
+feeds without exceptions; hidden-tab simulation held the feed DOM unchanged,
+then delivered eight visible rows and an overflow summary for 1,000 events.
+Emulated reduced motion left all feed-row transforms at `none`. A separate
+temporary component harness using actual inbox/tape components and fixture
+wallets/RPC confirmed read state after reload, switching A→B→A without leaking
+A's fills, disconnect clearing the inbox, and **25 DOM rows for 2,000 trades**
+(24 data rows plus a spacer, both at the top and after scrolling).
+
+Profiler comparison: 500 synthetic trades per sample, normal motion,
+development React Profiler, Node 24.15.0, Next 16.2.6, React 19.2.4. The baseline
+uses the `develop@529912f` feed implementations with the same profiler wrapper;
+the final feed uses the shared batcher. Each row sums the measured intervals
+including the final settling interval. These are single local samples, not a
+hardware-independent FPS claim. See CONTRIBUTING.md for reproduction.
+
+| Feed | Events/second | Before commits | After commits | Before render ms | After render ms |
+|---|---:|---:|---:|---:|---:|
+| Market | 500 | 40 | 57 | 463.1 | 247.0 |
+| Market | 50 | 323 | 496 | 3,191.4 | 2,112.5 |
+| Home | 500 | 102 | 61 | 232.8 | 203.1 |
+| Home | 50 | 497 | 499 | 1,412.1 | 1,007.3 |
+
+The slower baseline market feed coalesces more events under main-thread load;
+its lower commit count does not mean it delivered more responsive updates.
+The new scheduler emits at most one subscriber batch per frame and removes
+animation wrappers during sustained bursts. Render time decreased in these
+samples, while the ring bounds and scheduler behavior are also unit tested.
+
+Still manual: signing buy/sell/redeem with a real browser wallet, real
+two-wallet event delivery, and live seeded-market resolution/redemption. No
+transactions were submitted during verification. Event decoding tests use
+contract-shaped XDR fixtures, not a newly captured testnet trade. Follow the
+new checklist in [manual-test.md](manual-test.md).
+
+[Production inbox screenshot, disconnected](images/notifications-disconnected.png).
 
 ## ⚠️ Action required before anything else
 

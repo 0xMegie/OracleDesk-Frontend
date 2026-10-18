@@ -37,6 +37,39 @@ npm run build
 `npm run e2e:testnet` is an optional, read-only check against a running
 backend and live testnet; see the header of `e2e/testnet.e2e.test.ts`.
 
+## Measuring realtime feeds
+
+Use separate terminals:
+
+```bash
+node scripts/realtime-burst.mjs --manual --port 4310
+NEXT_PUBLIC_API_URL=http://localhost:4310/api/v1 npm run dev
+```
+
+Open `/markets?profile=1` or `/?profile=1` and keep that tab visible.
+Development-only React Profiler logs `[realtime-profile]`, the component
+name, commit count and total `actualDuration` every second. Let the page
+settle, then trigger each sample from another terminal:
+
+```bash
+curl 'http://localhost:4310/burst?count=500&rate=500'
+# Wait for completion before starting the next sample.
+curl 'http://localhost:4310/burst?count=500&rate=50'
+```
+
+Sum logged intervals covering each burst and its final settling interval.
+Use the same browser, viewport and animation preference for both revisions.
+For a baseline, instrument the original feed with the same profiler wrapper;
+the original feeds need no functional changes. Profiler time measures React
+render work, not socket validation, paint, or end-to-end latency. Slow
+baselines may coalesce events under load, so fewer commits alone do not
+prove better responsiveness. Production ignores `?profile=1`.
+
+The simulator serves an empty market API and emits synthetic public trades;
+it never signs or submits transactions. `--count`, `--rate` and `--port` also
+configure its automatic burst (omit `--manual` to emit after the first
+connection). See [docs/STATUS.md](docs/STATUS.md) for measured results.
+
 ## When the contracts change
 
 The contracts live in

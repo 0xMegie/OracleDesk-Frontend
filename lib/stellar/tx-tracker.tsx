@@ -10,6 +10,7 @@ import {
   mergeRecords,
   saveRecords,
   tradeInvalidationKeys,
+  isValidRecord,
   type TrackedKind,
   type TrackedTx,
 } from "./tx-tracker-core";
@@ -94,7 +95,7 @@ export function TransactionTrackerProvider({ children }: { children: React.React
         const data = event.data;
         if (!data || typeof data !== "object") return;
 
-        if (data.type === "record_update" && data.record) {
+        if (data.type === "record_update" && isValidRecord(data.record, NETWORK_PASSPHRASE)) {
           updateRecords((prev) => mergeRecords(prev, [data.record]));
           if (data.record.state === "confirmed") {
             invalidateFor(data.record);
@@ -180,7 +181,7 @@ export function TransactionTrackerProvider({ children }: { children: React.React
         document.removeEventListener("visibilitychange", handleVisibilityChange);
       }
     };
-  }, [updateRecords, invalidateFor]);
+  }, [records, updateRecords, invalidateFor]);
 
   const track = useCallback(
     (tx: Omit<TrackedTx, "state" | "submittedAt">) => {
@@ -193,25 +194,8 @@ export function TransactionTrackerProvider({ children }: { children: React.React
       updateRecords((prev) => mergeRecords(prev, [newRecord]));
       channelRef.current?.postMessage({ type: "record_update", record: newRecord });
 
-      // Trigger poller immediately
-      if (!isPollingRef.current) {
-        setTimeout(async () => {
-          try {
-            const server = rpcServer();
-            const res = await server.getTransaction(newRecord.hash);
-            const updated = evaluateTxStatus(newRecord, res);
-            if (updated.state !== newRecord.state) {
-              updateRecords((prev) => mergeRecords(prev, [updated]));
-              if (updated.state === "confirmed") invalidateFor(updated);
-              channelRef.current?.postMessage({ type: "record_update", record: updated });
-            }
-          } catch {
-            // ignore
-          }
-        }, 1500);
-      }
     },
-    [updateRecords, invalidateFor],
+    [updateRecords],
   );
 
   const dismiss = useCallback(
