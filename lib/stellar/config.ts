@@ -51,6 +51,16 @@ export const IPFS_GATEWAY = env(process.env.NEXT_PUBLIC_IPFS_GATEWAY_URL, "https
 /** The contracts repo's x402 trace service (per-trace unlocks). Empty if not deployed. */
 export const X402_URL = env(process.env.NEXT_PUBLIC_X402_URL, "");
 
+/**
+ * WalletConnect (mobile wallets such as LOBSTR and Freighter Mobile). Off
+ * unless a WalletConnect Cloud project id is set. The project's allowed-origin
+ * list is what protects it, not the id itself.
+ */
+export const WALLETCONNECT_PROJECT_ID = env(process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID, "");
+/** Public URL of this app, shown to the wallet while it pairs. */
+export const APP_URL = env(process.env.NEXT_PUBLIC_APP_URL, "http://localhost:3000");
+export const WALLETCONNECT_CHAIN = NETWORK_PASSPHRASE === TESTNET_PASSPHRASE ? "stellar:testnet" : "stellar:pubnet";
+
 export const explorerTx = (hash: string) => `${EXPLORER_URL}/tx/${hash}`;
 export const explorerAccount = (address: string) =>
   `${EXPLORER_URL}/${address.startsWith("C") ? "contract" : "account"}/${address}`;

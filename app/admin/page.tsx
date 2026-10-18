@@ -2,6 +2,7 @@
 
 import React from "react";
 import Link from "next/link";
+import { RequireWallet } from "@/components/require-wallet";
 import { useWallet } from "@/lib/contexts/WalletContext";
 import { useMarkets } from "@/lib/hooks/useMarkets";
 import { usePlatformStats } from "@/lib/hooks/usePortfolio";
@@ -36,35 +37,21 @@ const MarketItem = ({ title, status, volume }: { title: string, status: string, 
 );
 
 export default function AdminDashboard() {
-  const { isConnected, address, openModal } = useWallet();
+  return (
+    <RequireWallet
+      title="Restricted Access"
+      description="The Admin Control Center requires a secure wallet connection for institutional authentication."
+    >
+      <AdminContent />
+    </RequireWallet>
+  );
+}
+
+function AdminContent() {
+  const { address, disconnect, openModal } = useWallet();
   const { data: marketsData, isLoading } = useMarkets({ limit: 10 });
   const { data: stats } = usePlatformStats();
   const markets = marketsData?.markets ?? [];
-
-  if (!isConnected) {
-    return (
-      <main className="flex-grow flex items-center justify-center p-gutter">
-        <div className="max-w-md w-full text-center space-y-6 bg-white p-10 rounded-xl border border-outline-variant shadow-sm">
-          <div className="w-20 h-20 bg-primary-container text-primary rounded-full flex items-center justify-center mx-auto">
-            <span className="material-symbols-outlined text-4xl">lock</span>
-          </div>
-          <div className="space-y-2">
-            <h2 className="font-headline-md text-headline-md">Restricted Access</h2>
-            <p className="text-on-surface-variant">
-              The Admin Control Center requires a secure wallet connection for institutional authentication.
-            </p>
-          </div>
-          <button
-            onClick={openModal}
-            className="w-full bg-primary text-primary-foreground py-4 rounded-lg font-label-caps text-label-caps hover:brightness-110 transition-all flex items-center justify-center gap-2 shadow-lg cursor-pointer"
-          >
-            <span className="material-symbols-outlined">account_balance_wallet</span>
-            CONNECT WALLET TO ACCESS
-          </button>
-        </div>
-      </main>
-    );
-  }
 
   // UI gate only. The backend checks ADMIN_ADDRESSES itself on every admin
   // request; hiding this page does not protect anything.
@@ -87,7 +74,8 @@ export default function AdminDashboard() {
             </p>
           </div>
           <button
-            onClick={openModal}
+            // Disconnect first so the kit's picker lets the user choose another account.
+            onClick={() => void disconnect().then(() => openModal())}
             className="w-full bg-outline text-on-outline py-4 rounded-lg font-label-caps text-label-caps hover:brightness-90 transition-all flex items-center justify-center gap-2 shadow-lg cursor-pointer"
           >
             <span className="material-symbols-outlined">swap_horiz</span>

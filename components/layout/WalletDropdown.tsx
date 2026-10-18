@@ -3,9 +3,9 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useWallet } from "@/lib/contexts/WalletContext";
-import { useEnableUsdc, useUsdcBalance, useUsdcTrustline } from "@/lib/hooks/useStellar";
-import { NETWORK_LABEL, explorerAccount } from "@/lib/stellar/config";
-import { formatUsdc, shortAddress } from "@/lib/stellar/units";
+import { useAccountReserve, useEnableUsdc, useRpcNetwork, useUsdcBalance, useUsdcTrustline } from "@/lib/hooks/useStellar";
+import { NETWORK_LABEL, NETWORK_PASSPHRASE, TESTNET_PASSPHRASE, explorerAccount } from "@/lib/stellar/config";
+import { formatUsdc, formatXlm, shortAddress } from "@/lib/stellar/units";
 
 const WalletDropdown = () => {
   const { address, isConnected, isConnecting, isWrongNetwork, openModal, disconnect, error } = useWallet();
@@ -15,6 +15,8 @@ const WalletDropdown = () => {
   const balance = useUsdcBalance(address);
   const trustline = useUsdcTrustline(address);
   const enableUsdc = useEnableUsdc();
+  const reserve = useAccountReserve(address);
+  const rpcNetwork = useRpcNetwork();
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -48,6 +50,15 @@ const WalletDropdown = () => {
     : balance.data !== undefined
     ? formatUsdc(balance.data, { maxDecimals: 2, minDecimals: 2, grouping: true })
     : balance.isError ? "—" : "…";
+  const notActivated = !isWrongNetwork && reserve.data?.funded === false;
+  const xlmText = reserve.data?.funded
+    ? formatXlm(reserve.data.balance, { maxDecimals: 2, minDecimals: 2, grouping: true })
+    : reserve.isError ? "—" : "…";
+  // Friendbot exists only on testnet; the RPC says where it is.
+  const friendbotUrl =
+    NETWORK_PASSPHRASE === TESTNET_PASSPHRASE && rpcNetwork.data?.friendbotUrl
+      ? `${rpcNetwork.data.friendbotUrl}?addr=${encodeURIComponent(address)}`
+      : null;
 
   const handleEnableUsdc = async () => {
     try {
@@ -115,6 +126,31 @@ const WalletDropdown = () => {
                   USDC
                 </span>
               </div>
+              {!isWrongNetwork && (
+                <div className="mt-2 flex items-baseline gap-1">
+                  <span className="text-sm font-bold text-on-surface font-data-mono">{xlmText}</span>
+                  <span className="text-xs font-bold text-on-surface-variant uppercase">XLM</span>
+                  <span className="ml-1 text-[10px] text-on-surface-variant">(fees and reserve)</span>
+                </div>
+              )}
+              {notActivated && (
+                <div role="status" className="mt-3 rounded-md border border-outline-variant bg-white p-2">
+                  <span className="block text-xs font-bold text-on-surface">Account not activated</span>
+                  <p className="mt-1 text-[11px] text-on-surface-variant">
+                    This Stellar account needs a little XLM before it can trade. Fund it to continue.
+                  </p>
+                  {friendbotUrl && (
+                    <a
+                      href={friendbotUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mt-2 inline-block rounded-md bg-primary px-3 py-1.5 text-xs font-bold text-primary-foreground"
+                    >
+                      Fund with Friendbot
+                    </a>
+                  )}
+                </div>
+              )}
               {trustlineMissing && !isWrongNetwork && (
                 <button
                   type="button"

@@ -43,6 +43,7 @@ export const stellarKeys = {
   position: (id: string, holder: string) => ["stellar", "position", id, holder] as const,
   balance: (owner: string) => ["stellar", "usdcBalance", owner] as const,
   account: (addr: string) => ["stellar", "account", addr] as const,
+  rpcNetwork: ["stellar", "rpcNetwork"] as const,
   quoteBuy: (id: string, outcome: OutcomeTag, amount: string) => ["stellar", "quoteBuy", id, outcome, amount] as const,
   exactBuy: (id: string, outcome: OutcomeTag, target: string) => ["stellar", "exactBuy", id, outcome, target] as const,
   trace: (id: string) => ["stellar", "trace", id] as const,
@@ -189,11 +190,16 @@ export interface AccountReserveState extends AccountReserve {
   funded: boolean;
 }
 
-/** Reads account entry via getLedgerEntries on the account key. */
+/**
+ * Reads account entry via getLedgerEntries on the account key. Polls faster
+ * while the account is unfunded, so the UI flips soon after a Friendbot top-up.
+ */
 export function useAccountReserve(address: string | null | undefined) {
   return useQuery({
     queryKey: stellarKeys.account(address ?? ""),
     enabled: Boolean(address),
+    staleTime: 15_000,
+    refetchInterval: (q) => (q.state.data?.funded === false ? 10_000 : 60_000),
     queryFn: async (): Promise<AccountReserveState> => {
       if (!address) {
         return {
@@ -420,12 +426,22 @@ export function useVerifiedTrace(onChainTraceId: bigint | string | null | undefi
 
 function useWriteGuard(): () => Signer {
   const { signer, isWrongNetwork } = useWallet();
+  const queryClient = useQueryClient();
   return () => {
     if (!signer) {
       throw new UserFacingError({ kind: "disconnected", message: "Connect your wallet first." });
     }
     if (isWrongNetwork) {
       throw new UserFacingError({ kind: "wrong-network", message: "Switch your wallet to Stellar Testnet and try again." });
+    }
+    // An unfunded account has no ledger entry, so building any transaction
+    // from it would fail with a raw SDK error. Refuse here, in plain words.
+    const account = queryClient.getQueryData<AccountReserveState>(stellarKeys.account(signer.publicKey));
+    if (account && !account.funded) {
+      throw new UserFacingError({
+        kind: "account-not-found",
+        message: "Your Stellar account isn't activated yet. Fund it with XLM first.",
+      });
     }
     return signer;
   };
@@ -437,7 +453,18 @@ export function useInvalidateAfterTrade() {
     for (const key of tradeInvalidationKeys(marketId, holder)) {
       queryClient.invalidateQueries({ queryKey: key });
     }
+    // Fees change the XLM balance, so the account entry is stale after a trade.
+    queryClient.invalidateQueries({ queryKey: stellarKeys.account(holder) });
   };
+}
+
+/** The RPC's network info, including the Friendbot URL on testnet. */
+export function useRpcNetwork() {
+  return useQuery({
+    queryKey: stellarKeys.rpcNetwork,
+    queryFn: () => rpcServer().getNetwork(),
+    staleTime: Infinity,
+  });
 }
 
 function useTxRunner(contract: ContractName) {

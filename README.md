@@ -55,6 +55,8 @@ To trade on testnet you need XLM and test USDC; follow [docs/manual-test.md](doc
 
 All variables are listed and explained in [.env.example](.env.example). Everything defaults to Stellar Testnet and the contract ids in the synced deployments file. Every `NEXT_PUBLIC_*` value is compiled into browser JavaScript, so never put a secret in one.
 
+**Mobile wallets (WalletConnect).** Set `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` to show WalletConnect in the connect modal, so phone wallets such as LOBSTR or Freighter Mobile can pair with a QR code. The kit and WalletConnect load only when this is set, behind a dynamic import, so pages that don't need them are unchanged. Set `NEXT_PUBLIC_APP_URL` to the deployed origin and allow that origin in the WalletConnect Cloud project.
+
 ## Scripts
 
 | Script | What it does |

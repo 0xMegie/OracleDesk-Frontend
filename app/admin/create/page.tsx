@@ -1,14 +1,27 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
+import { RequireWallet } from "@/components/require-wallet";
 import { useWallet } from "@/lib/contexts/WalletContext";
 import { useGenerateMarket } from "@/lib/hooks/useMarkets";
+import { UserFacingError } from "@/lib/stellar/errors";
 import type { MarketCategory } from "@/lib/api/markets";
 import { isAdminAddress } from "@/lib/stellar/config";
 import { BACKEND_CATEGORIES, BACKEND_CATEGORY_LABELS, BACKEND_TO_CONTRACT_CATEGORY } from "@/lib/stellar/categories";
 
 export default function AdminPage() {
-  const { isConnected, address, openModal, ensureSession } = useWallet();
+  return (
+    <RequireWallet
+      title="Restricted Access"
+      description="The Market Deployment Terminal requires a secure wallet connection for institutional authentication."
+    >
+      <AdminCreateContent />
+    </RequireWallet>
+  );
+}
+
+function AdminCreateContent() {
+  const { address, withSession } = useWallet();
   const generateMarket = useGenerateMarket();
 
   const [question, setQuestion] = useState("");
@@ -64,48 +77,23 @@ export default function AdminPage() {
     }
 
     addLog("INITIATING_GEN_AI_ORACLE...");
-    if (!(await ensureSession())) {
-      addLog("ERROR: WALLET_SIGN_IN_REQUIRED");
-      return;
-    }
     try {
-      const result = await generateMarket.mutateAsync({
-        question,
-        category,
-        expiry
-      });
+      // Signs in to the backend only now, right before the protected call.
+      const result = await withSession(
+        () => generateMarket.mutateAsync({ question, category, expiry }),
+        "generate a market",
+      );
       addLog(`SUCCESS: JOB_${result.jobId.substring(0,8)}`);
       setQuestion("");
     } catch (err) {
+      if (err instanceof UserFacingError) {
+        addLog(`ERROR: ${err.message}`);
+        return;
+      }
       console.error("Market generation failed:", err);
       addLog("ERROR: DEPLOYMENT_FAILED");
     }
   };
-
-  if (!isConnected) {
-    return (
-      <main className="flex-grow flex items-center justify-center p-gutter">
-        <div className="max-w-md w-full text-center space-y-6 bg-white p-10 rounded-xl border border-outline-variant shadow-sm">
-          <div className="w-20 h-20 bg-primary-container text-primary rounded-full flex items-center justify-center mx-auto">
-            <span className="material-symbols-outlined text-4xl">lock</span>
-          </div>
-          <div className="space-y-2">
-            <h2 className="font-headline-md text-headline-md">Restricted Access</h2>
-            <p className="text-on-surface-variant">
-              The Market Deployment Terminal requires a secure wallet connection for institutional authentication.
-            </p>
-          </div>
-          <button
-            onClick={() => openModal()}
-            className="w-full bg-primary text-primary-foreground py-4 rounded-lg font-label-caps text-label-caps hover:brightness-110 transition-all flex items-center justify-center gap-2 shadow-lg cursor-pointer"
-          >
-            <span className="material-symbols-outlined">account_balance_wallet</span>
-            CONNECT WALLET TO ACCESS
-          </button>
-        </div>
-      </main>
-    );
-  }
 
   // UI gate only; the backend enforces ADMIN_ADDRESSES on /markets/generate.
   if (!isAdminAddress(address)) {

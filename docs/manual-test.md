@@ -26,8 +26,9 @@ These steps cover what automated checks can't: a real browser wallet signing rea
 
 ## 3. Fund the account with Friendbot
 
-- [ ] Open `https://friendbot.stellar.org/?addr=<YOUR_G_ADDRESS>` (or Freighter's "Fund with Friendbot" button).
-- [ ] Freighter shows about 10,000 XLM.
+- [ ] Before funding, the wallet menu shows **Account not activated** with a **Fund with Friendbot** link (testnet only). A buy is refused with "Your Stellar account isn't activated yet", not a raw SDK error.
+- [ ] Open `https://friendbot.stellar.org/?addr=<YOUR_G_ADDRESS>` (or the menu's **Fund with Friendbot** link).
+- [ ] Freighter shows about 10,000 XLM. Within about 10 seconds the menu flips from "Account not activated" to an XLM balance (about 10,000 XLM).
 
 ## 4. Get test USDC
 
@@ -50,9 +51,20 @@ stellar contract invoke --id CA2WQQJ4OHQCLHQW6XN4BCLILGRV6V4YDYDT3GVIWXB53BTOO7E
 ## 5. Connect
 
 - [ ] Open `http://localhost:3000`, click **Connect Wallet**, choose Freighter, approve.
-- [ ] You're taken to `/markets` once. Reload the page: you stay where you are and are still connected (the old app redirected on every reload).
-- [ ] Freighter asks you to sign a transaction for OracleDesk login. It is never submitted; it proves you own the key. Approve it.
-- [ ] Expected: no error under the button. In DevTools → Application → Local Storage, `oracledesk_wallet` equals your address.
+- [ ] After approving, you **stay on the page you were on**. No login signature is requested yet. Reload the page: you stay where you are and are still connected.
+- [ ] No login signature appears until you do something that needs OracleDesk's server (copy trade, daily pass, admin). Then Freighter asks you to sign a transaction for OracleDesk login. It is never submitted; it proves you own the key. Approve it, and a sentence explains why it appears.
+- [ ] Sub-step: start the connect from `/copy-trade?traceId=…` with a non-default slider value. After approving, the URL and the slider value are unchanged.
+- [ ] Expected: no error under the button. In DevTools → Application → Local Storage, `oracledesk_wallet` equals your address once you have signed in.
+
+## 5a. Mobile wallet (WalletConnect)
+
+Needs `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` set and this origin allowed in the project.
+
+- [ ] Desktop: click **Connect Wallet**, pick the WalletConnect option, scan the QR code with LOBSTR or Freighter Mobile on **testnet**.
+- [ ] Approve the pairing on the phone. The app shows the account and stays on the current page.
+- [ ] Log in (step 5) and buy. Each signature is approved on the phone; the page waits for the wallet's answer.
+- [ ] Reload: the session restores without a prompt.
+- [ ] If the phone's session has ended, a trade shows "Your mobile wallet session ended. Connect your mobile wallet again." (not a raw error).
 
 ## 6. See your balance
 
