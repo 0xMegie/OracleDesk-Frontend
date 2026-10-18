@@ -47,6 +47,8 @@ import type { rpc } from "@stellar/stellar-sdk";
 
 export interface DescribedError {
   kind:
+    | "stale-sequence"
+    | "low-reserve"
     | "rejected"
     | "insufficient-balance"
     | "insufficient-xlm"
@@ -120,7 +122,7 @@ export function describeError(err: unknown, contract: ContractName = "marketCore
     };
   }
   if (/op_low_reserve|opLowReserve|txInsufficientBalance|tx_insufficient_balance/i.test(text)) {
-    return { kind: "low-reserve", message: "Your account needs more spendable XLM to add the USDC trustline." };
+    return { kind: "insufficient-xlm", message: "Your account needs more spendable XLM to add the USDC trustline." };
   }
   if (/balance is not sufficient|resulting balance is not within the allowed range|insufficient (balance|funds)|BalanceError|op_underfunded/i.test(text)) {
     return { kind: "insufficient-balance", message: "You don't have enough USDC for this." };
@@ -252,4 +254,12 @@ export class UserFacingError extends Error {
     super(described.message);
     this.name = "UserFacingError";
   }
+}
+
+export function classifySequenceError(error: unknown): boolean {
+  if (/tx_bad_seq|txBadSeq|bad sequence/i.test(textOf(error))) return true;
+  if (!error || typeof error !== "object") return false;
+  const response = error as { errorResult?: { result(): { switch(): { name: string } } }; sendTransactionResponse?: unknown };
+  if (response.sendTransactionResponse) return classifySequenceError(response.sendTransactionResponse);
+  try { return response.errorResult?.result().switch().name === "txBadSeq"; } catch { return false; }
 }

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- SDK assembled transactions are invariant; these boundary helpers preserve the exact binding return type. */
 import { Ok, Err } from "@stellar/stellar-sdk/contract";
 import type { AssembledTransaction, Result } from "@stellar/stellar-sdk/contract";
 import type { ContractName } from "./errors";
@@ -19,14 +20,12 @@ export type TxValue<Tx> = Tx extends AssembledTransaction<infer T> ? T : never;
  * Unwrapped value: Result<V> -> V, otherwise T itself.
  * Wrapped in a tuple to prevent distributive conditional typing over unions.
  */
-export type Unwrapped<T> = [T] extends [Result<infer V, any>]
+export type Unwrapped<T> = [T] extends [Result<infer V>]
   ? V
-  : [T] extends [Result<infer V>]
-    ? V
-    : T;
+  : T;
 
 /** For a client method: (args, opts?) => Promise<AssembledTransaction<X>> -> Unwrapped<X> */
-export type MethodValue<M> = M extends (...a: any[]) => Promise<infer Tx> ? Unwrapped<TxValue<Tx>> : never;
+export type MethodValue<M> = M extends (...a: never[]) => Promise<infer Tx> ? Unwrapped<TxValue<Tx>> : never;
 
 export type MarketCoreClient = ReturnType<typeof marketCore>;
 export type RegistryClient = ReturnType<typeof reasoningRegistry>;
@@ -68,7 +67,7 @@ export function read<Tx extends AssembledTransaction<any>>(
 export async function submit<Tx extends AssembledTransaction<any>>(
   tx: Tx,
   contract: ContractName = "marketCore",
-): Promise<{ value: Unwrapped<TxValue<Tx>>; txHash: string | null }> {
+): Promise<{ value: Unwrapped<TxValue<Tx>>; txHash: string | null; ledger: number | null }> {
   // Surface simulation failures before asking the wallet to sign.
   read(tx, contract);
   try {
@@ -84,6 +83,7 @@ export async function submit<Tx extends AssembledTransaction<any>>(
     return {
       value: unwrapped as Unwrapped<TxValue<Tx>>,
       txHash: sent.sendTransactionResponse?.hash ?? null,
+      ledger: sent.getTransactionResponse && "ledger" in sent.getTransactionResponse ? sent.getTransactionResponse.ledger : null,
     };
   } catch (err) {
     if (err instanceof UserFacingError) throw err;
@@ -96,3 +96,10 @@ export async function submit<Tx extends AssembledTransaction<any>>(
  * the binding method signature without requiring explicit type arguments.
  */
 export const simulated = read;
+
+export function simulatedWithLedger<Tx extends AssembledTransaction<any>>(tx: Tx, contract: ContractName = "marketCore") {
+  const value = read(tx, contract);
+  const ledger = tx.simulation?.latestLedger;
+  if (!Number.isSafeInteger(ledger) || !ledger || ledger < 0) throw new Error("RPC returned a read without its ledger");
+  return { value, ledger };
+}

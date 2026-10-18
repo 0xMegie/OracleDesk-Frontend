@@ -1,5 +1,10 @@
 "use client";
 
+import { TxReview, TxReviewPreferenceControl, shouldSkipTxReview } from "@/components/tx-review";
+import type { ReviewModel } from "@/lib/stellar/tx-decode";
+import { useSubmitQueueState } from "@/lib/stellar/submit-queue";
+
+
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -109,6 +114,7 @@ const features = [
 export default function PremiumPage() {
   const { address, isConnected, isWrongNetwork, openModal, ensureSession } = useWallet();
   const transfer = useUsdcTransfer();
+  const submitQueue = useSubmitQueueState(address);
   const unlock = useUnlockTrace();
   const reserve = useAccountReserve(address);
 
@@ -195,6 +201,7 @@ export default function PremiumPage() {
         to: PAYMENTS_RECIPIENT,
         amount: selectedTier.priceRaw,
         prepared: prepareTransfer.data,
+        review: reviewPreparedTransfer,
         followUp: {
           type: "unlock-daily-pass",
           traceId: DAILY_PASS_TRACE_PLACEHOLDER,

@@ -13,7 +13,7 @@ interface LedgerPoint {
 }
 
 export async function fetchLatestLedger(): Promise<LedgerPoint> {
-  const latest = await rpcServer.getLatestLedger();
+  const latest = await rpcServer().getLatestLedger();
   const closeTime = Number(latest.closeTime);
   if (!Number.isSafeInteger(latest.sequence) || !Number.isFinite(closeTime) || closeTime < 0) {
     throw new Error("The Stellar RPC returned an invalid ledger clock sample.");
@@ -125,3 +125,5 @@ export function useLedgerNow(): { now: number | null; uncertainty: number } {
   useSyncExternalStore(ledgerClock.subscribe, () => ledgerClock.version, () => 0);
   return { now: ledgerClock.now(), uncertainty: ledgerClock.uncertainty() };
 }
+
+export const getLedgerNow = () => ledgerClock.now();

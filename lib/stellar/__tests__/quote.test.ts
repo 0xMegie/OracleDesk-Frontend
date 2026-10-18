@@ -9,7 +9,7 @@ const market = (yes: bigint, no: bigint, fee = 0n, sets = 100_000n) =>
     reserve_no: no,
     fee_bps: fee,
     sets_minted: sets,
-  }) as Market;
+  }) as unknown as Market;
 
 describe("minCollateralForShares", () => {
   it("finds the minimum collateral for a target in the reference pool", () => {

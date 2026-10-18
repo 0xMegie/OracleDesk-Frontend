@@ -1,5 +1,10 @@
 "use client";
 
+import { TxReview, TxReviewPreferenceControl, shouldSkipTxReview } from "@/components/tx-review";
+import type { ReviewModel } from "@/lib/stellar/tx-decode";
+import { useSubmitQueueState } from "@/lib/stellar/submit-queue";
+
+
 import React, { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
@@ -8,11 +13,17 @@ import { useQuery } from "@tanstack/react-query";
 import { useMarket } from "@/lib/hooks/useMarkets";
 import { getMarketByOnChainId } from "@/lib/api/markets";
 import { ApiError } from "@/lib/api/client";
-import { useBuy, useOnChainMarket, usePosition, useQuoteBuy, useUsdcBalance, useAccountReserve, usePrepareBuy } from "@/lib/hooks/useStellar";
+import { useBuy, useOnChainMarket, usePosition, useQuoteBuy, useUsdcBalance, useAccountReserve, usePrepareBuy, useMarketConfig, useLedgerNow, useEnableUsdc, useUsdcTrustline, useExactBuyQuote, usePositionState, useUsdcBalanceState } from "@/lib/hooks/useStellar";
 import { useWallet } from "@/lib/contexts/WalletContext";
 import { explorerTx } from "@/lib/stellar/config";
-import { formatUsdc, minOut, tryParseUsdc } from "@/lib/stellar/units";
+import { formatUsdc, formatXlm, maxIn, minOut, tryParseUsdc } from "@/lib/stellar/units";
 import { buyBreakdown } from "@/lib/stellar/buy-breakdown";
+
+import type { TxPhase } from "@/lib/stellar/tx-lifecycle";
+import { preflightBuy } from "@/lib/stellar/preflight";
+import { useLedgerNow as useLedgerClock } from "@/lib/stellar/ledger-clock";
+import { MIN_TX_TIMEOUT_S, SAFETY_MARGIN_S } from "@/lib/stellar/deadline";
+import { PendingValue } from "@/components/pending-value";
 
 const SLIPPAGE_BPS = 100; // 1%
 
@@ -91,6 +102,15 @@ function MarketQuickViewContent() {
   const position = usePosition(onChainMarketId, address);
   const balance = useUsdcBalance(address);
   const reserve = useAccountReserve(address);
+  const positionState = usePositionState(onChainMarketId, address);
+  const balanceState = useUsdcBalanceState(address);
+  const config = useMarketConfig();
+  const ledgerNow = useLedgerNow();
+  const ledger = useLedgerClock();
+  const trustline = useUsdcTrustline(address);
+  const enableUsdc = useEnableUsdc();
+  const trustlineMissing = trustline.data?.kind === "missing";
+  const trustlineUnauthorized = trustline.data?.kind === "present" && !trustline.data.authorized;
   const buy = useBuy();
   const submitQueue = useSubmitQueueState(address);
   const [now, setNow] = useState<number | null>(null);
@@ -108,7 +128,23 @@ function MarketQuickViewContent() {
   const reviewResolver = useRef<((approved: boolean) => void) | null>(null);
   const amountRaw = tryParseUsdc(amountInput);
   const debouncedAmount = useDebounced(amountRaw, 400);
-  const quote = useQuoteBuy(onChainMarketId, side, debouncedAmount);
+  const exactQuote = useExactBuyQuote(onChainMarketId, side, buyMode === "shares" ? debouncedAmount : null);
+  const spendRaw = buyMode === "shares" ? exactQuote.data?.collateralIn ?? null : amountRaw;
+  const quote = useQuoteBuy(onChainMarketId, side, buyMode === "usdc" ? debouncedAmount : spendRaw);
+  const prepareBuy = usePrepareBuy({ marketId: onChainMarketId, outcome: side, collateralIn: spendRaw, slippageBps: SLIPPAGE_BPS, holder: address });
+  const fees = prepareBuy.data?.fees;
+  const isUnfunded = reserve.data?.funded === false;
+  const isInsufficientXlm = !!(reserve.data?.funded && fees && fees.totalFee > reserve.data.spendable);
+  const xlmDeficit = reserve.data?.funded && fees && fees.totalFee > reserve.data.spendable ? fees.totalFee - reserve.data.spendable : 0n;
+  const closeReview = useCallback((approved: boolean) => {
+    setReviewModel(null); reviewResolver.current?.(approved); reviewResolver.current = null;
+  }, []);
+  const review = useCallback(async (_prepared: unknown, model: ReviewModel, changedFrom?: ReviewModel, force = false) => {
+    if (!force && shouldSkipTxReview()) return true;
+    setReviewModel({ model, changedFrom });
+    return new Promise<boolean>(resolve => { reviewResolver.current = resolve; });
+  }, []);
+  useEffect(() => () => { reviewResolver.current?.(false); }, []);
   const view = chain.data;
   const breakdown = view && debouncedAmount && debouncedAmount > 0n
     ? (() => {
@@ -126,6 +162,9 @@ function MarketQuickViewContent() {
   const noProb = 100 - yesProb;
   const chainStatus = view?.market.status;
   // Use a timer-backed timestamp so freshness changes are reflected without impure render reads.
+  const secondsToClose = ledger.now !== null && view ? Number(view.market.close_time - BigInt(Math.floor(ledger.now))) : null;
+  const safeToTrade = secondsToClose !== null && secondsToClose > SAFETY_MARGIN_S + MIN_TX_TIMEOUT_S;
+  const countdown = secondsToClose !== null && secondsToClose >= 0 && secondsToClose < 3600 ? `Closes in ${Math.floor(secondsToClose / 60)}m ${secondsToClose % 60}s` : null;
   const isOpen = chainStatus?.tag === "Open" && Number(view?.market.close_time ?? 0) * 1000 > chain.dataUpdatedAt;
   const isFresh = (updatedAt: number, maxAge: number) =>
     now !== null && now >= updatedAt && now - updatedAt <= maxAge;
@@ -149,7 +188,7 @@ function MarketQuickViewContent() {
           : undefined,
     },
     side,
-    amountRaw ?? 0n,
+    spendRaw ?? 0n,
   );
   const buyPreflightFailure = tradePreflight.ok === false ? tradePreflight.failures[0] : null;
 
@@ -191,7 +230,8 @@ function MarketQuickViewContent() {
       const result = await buy.mutateAsync({
         marketId: onChainMarketId,
         outcome: side,
-        collateralIn: amountRaw,
+        collateralIn: spendRaw ?? 0n,
+        review,
         slippageBps: SLIPPAGE_BPS,
         prepared: prepareBuy.data,
       });
@@ -418,7 +458,7 @@ function MarketQuickViewContent() {
                             ? `≈ ${formatUsdc(quote.data, { maxDecimals: 2 })} shares, at least ${formatUsdc(minOut(quote.data, SLIPPAGE_BPS), { maxDecimals: 2 })} (1% slippage)`
                             : quote.error ? quote.error.message : quote.isFetching ? "Quoting…" : ""}
                       </span>
-                      {balance.data !== undefined && <span>Balance {formatUsdc(balance.data, { maxDecimals: 2, grouping: true })}</span>}
+                      {balance.data !== undefined && <span>Balance {formatUsdc(balance.data, { maxDecimals: 2, grouping: true })}<PendingValue state={balanceState.data} /></span>}
                     </div>
 
                     {/* Network fee & reserve row */}
@@ -475,10 +515,10 @@ function MarketQuickViewContent() {
                       </div>
                     )}
                     {trustlineUnauthorized && <p className="text-[11px] text-error">The issuer hasn&apos;t authorized your USDC trustline.</p>}
-                    {position.data && (position.data.yes > 0n || position.data.no > 0n) && (
+                    {position.data && (position.data.yes > 0n || position.data.no > 0n || positionState.data?.provisional || positionState.data?.awaitingRpc) && (
                       <p className="text-[11px] font-data-mono text-on-surface">
                         Your position: {formatUsdc(position.data.yes, { maxDecimals: 2 })} YES · {formatUsdc(position.data.no, { maxDecimals: 2 })} NO
-                        <SourceTag source="chain" />
+                        <PendingValue state={positionState.data} fallback={<SourceTag source="chain" />} />
                       </p>
                     )}
 

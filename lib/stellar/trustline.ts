@@ -1,5 +1,5 @@
 import {
-  Address,
+  Keypair,
   Asset,
   BASE_FEE,
   Operation,
@@ -49,14 +49,14 @@ export function usdcClassicAsset(): Promise<Asset> {
 export async function getTrustlineState(account: string, asset: Asset): Promise<TrustlineState> {
   if (asset.isNative()) return { kind: "native" };
 
-  const address = new Address(account).toScAddress();
+  const address = Keypair.fromPublicKey(account).xdrPublicKey();
   const keys = [
     xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: address })),
-    xdr.LedgerKey.trustLine(
+    xdr.LedgerKey.trustline(
       new xdr.LedgerKeyTrustLine({ accountId: address, asset: asset.toTrustLineXDRObject() }),
     ),
   ];
-  const { entries } = await rpcServer.getLedgerEntries(...keys);
+  const { entries } = await rpcServer().getLedgerEntries(...keys);
   const accountEntry = entries.find((entry) => entry.key.switch().name === "account");
   if (!accountEntry) return { kind: "account-missing" };
   const trustlineEntry = entries.find((entry) => entry.key.switch().name === "trustline");
@@ -80,14 +80,14 @@ function accountExtensionV1(account: xdr.AccountEntry) {
 export async function reserveCheck(
   address: string,
 ): Promise<{ ok: boolean; spendable: bigint; required: bigint }> {
-  const account = await rpcServer.getAccountEntry(address);
+  const account = await rpcServer().getAccountEntry(address);
   const v1 = accountExtensionV1(account);
   const v2 = v1?.ext().switch() === 2 ? v1.ext().v2() : null;
   const numSponsoring = BigInt(v2?.numSponsoring() ?? 0);
   const numSponsored = BigInt(v2?.numSponsored() ?? 0);
   let baseReserve = 5_000_000n;
   try {
-    const latest = await rpcServer.getLatestLedger();
+    const latest = await rpcServer().getLatestLedger();
     baseReserve = BigInt(latest.headerXdr.baseReserve());
   } catch {
     // Older RPC endpoints may not return ledger headers; Stellar's base reserve is 0.5 XLM.
@@ -101,7 +101,7 @@ export async function reserveCheck(
 }
 
 export async function buildChangeTrustXdr(address: string, asset: Asset): Promise<string> {
-  const [account, feeStats] = await Promise.all([rpcServer.getAccount(address), rpcServer.getFeeStats()]);
+  const [account, feeStats] = await Promise.all([rpcServer().getAccount(address), rpcServer().getFeeStats()]);
   const recommended = BigInt(feeStats.inclusionFee.p70 || BASE_FEE);
   const fee = recommended > 10_000n ? 10_000n : recommended > BigInt(BASE_FEE) ? recommended : BigInt(BASE_FEE);
   return new TransactionBuilder(account, {
@@ -121,14 +121,14 @@ export async function submitAndPoll(
   opts: { timeoutMs?: number } = {},
 ): Promise<{ hash: string }> {
   const tx = TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE);
-  let response = await rpcServer.sendTransaction(tx);
+  let response = await rpcServer().sendTransaction(tx);
   if (response.status === "TRY_AGAIN_LATER") {
     await wait(2_000);
-    response = await rpcServer.sendTransaction(tx);
+    response = await rpcServer().sendTransaction(tx);
   }
   if (response.status === "ERROR") {
-    const described = describeError(response.errorResultXdr ?? "Transaction submission failed");
-    throw new UserFacingError(described, response.errorResultXdr);
+    const described = describeError(response.errorResult ?? "Transaction submission failed");
+    throw new UserFacingError(described, response.errorResult);
   }
   if (response.status !== "PENDING" && response.status !== "DUPLICATE") {
     throw new Error(`Unexpected transaction submission status: ${response.status}`);
@@ -138,7 +138,7 @@ export async function submitAndPoll(
   let delay = 500;
   while (Date.now() < deadline) {
     await wait(delay);
-    const result = await rpcServer.getTransaction(response.hash);
+    const result = await rpcServer().getTransaction(response.hash);
     if (result.status === "SUCCESS") return { hash: response.hash };
     if (result.status === "FAILED") {
       throw new UserFacingError(describeError(result.resultXdr.toXDR("base64")), result.resultXdr);

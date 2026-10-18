@@ -100,7 +100,7 @@ export async function ensureAuthWithSingleFlight(
 
   // Start new re-auth attempt
   const reAuthPromise = signInWithWallet(address, signTransaction);
-  setReAuthPromise(reAuthPromise);
+  setReAuthPromise(reAuthPromise.then(() => undefined));
 
   try {
     const session = await reAuthPromise;

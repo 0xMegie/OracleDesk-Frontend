@@ -1,4 +1,4 @@
-import { TransactionBuilder, Networks, FeeBumpTransaction } from "@stellar/stellar-sdk";
+import { TransactionBuilder, Transaction, FeeBumpTransaction } from "@stellar/stellar-sdk";
 import type { AuthChallenge } from "@/lib/api/auth";
 import { NETWORK_PASSPHRASE } from "./config";
 
@@ -15,7 +15,7 @@ export interface SEP10ValidationError {
 /**
  * Parse transaction XDR safely.
  */
-function parseTransactionXDR(xdr: string): { transaction: any; isFeeBump: boolean } | null {
+function parseTransactionXDR(xdr: string): { transaction: Transaction | FeeBumpTransaction; isFeeBump: boolean } | null {
   try {
     const tx = TransactionBuilder.fromXDR(xdr, NETWORK_PASSPHRASE);
     const isFeeBump = tx instanceof FeeBumpTransaction;
@@ -28,7 +28,7 @@ function parseTransactionXDR(xdr: string): { transaction: any; isFeeBump: boolea
 /**
  * Get the inner transaction from a fee-bump or regular transaction.
  */
-function getInnerTransaction(tx: any): any {
+function getInnerTransaction(tx: Transaction | FeeBumpTransaction): Transaction {
   return tx instanceof FeeBumpTransaction ? tx.innerTransaction : tx;
 }
 

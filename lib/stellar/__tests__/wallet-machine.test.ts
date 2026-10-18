@@ -112,7 +112,7 @@ describe("wallet machine: connect", () => {
       { type: "KIT_STATE_UPDATED", address: A, passphrase: null, storedSessionWallet: null },
     ], disconnected);
     expect(state.tag).toBe("connecting");
-    expect(effects).toEqual([]);
+    expect(effects).toEqual([{ type: "openAuthModal", epoch: 0 }]);
   });
 });
 
@@ -147,7 +147,7 @@ describe("wallet machine: sign-in", () => {
       connectedA,
     );
     expect(failed.state).toMatchObject({ tag: "connected", address: A, session: null, error: "Login was declined" });
-    expect(failed.effects).toEqual([{ type: "resolveEnsure", ok: false }]);
+    expect(failed.effects).toEqual([{ type: "signIn", address: A, epoch: 0, attempt: 1 }, { type: "resolveEnsure", ok: false }]);
   });
 
   it("account change during authenticating drops the stale sign-in result", () => {

@@ -27,7 +27,7 @@ function mockTx<T>(
 function mockThrowingTx(
   errorToThrow: unknown,
   simulation?: { error?: string },
-): AssembledTransaction<any> {
+): AssembledTransaction<unknown> {
   const signAndSend = vi.fn();
   return {
     get result() {
@@ -35,7 +35,7 @@ function mockThrowingTx(
     },
     simulation,
     signAndSend,
-  } as unknown as AssembledTransaction<any>;
+  } as unknown as AssembledTransaction<unknown>;
 }
 
 describe("bytesToHex utility", () => {
@@ -72,7 +72,7 @@ describe("read() runtime helper", () => {
   });
 
   it("throws UserFacingError on Err with contract error code mapped", () => {
-    const tx = mockTx(new Err("Error(Contract, #12)"), {
+    const tx = mockTx(new Err({ message: "Error(Contract, #12)" }), {
       simulation: { error: "HostError Error(Contract, #12)" },
     });
     expect(() => read(tx, "marketCore")).toThrow(UserFacingError);
@@ -144,6 +144,7 @@ describe("submit() runtime helper", () => {
     const res = await submit(tx, "marketCore");
     expect(res).toEqual({
       value: okValue,
+      ledger: null,
       txHash: "mocked-hash-xyz",
     });
     expect(tx.signAndSend).toHaveBeenCalledTimes(1);
@@ -158,6 +159,7 @@ describe("submit() runtime helper", () => {
     const res = await submit(tx);
     expect(res).toEqual({
       value: 42n,
+      ledger: null,
       txHash: null,
     });
   });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { xdr, type rpc } from "@stellar/stellar-sdk";
-import { describeError, describeSubmission } from "../errors";
+import { classifySequenceError, describeError, describeSubmission } from "../errors";
 
 describe("describeError", () => {
   it("maps market-core contract errors by code", () => {

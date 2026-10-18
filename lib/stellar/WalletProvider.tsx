@@ -76,7 +76,9 @@ export function WalletProvider({ children, kitLoader = loadStellarWalletsKit }: 
   );
 
   // All wallet logic lives in the state machine; this component only renders it.
+  // The initializer stores deferred navigation callbacks; it never reads the ref.
   const [interpreter] = useState(
+    // eslint-disable-next-line react-hooks/refs
     () =>
       new WalletInterpreter({
         loadKit: kitLoader,

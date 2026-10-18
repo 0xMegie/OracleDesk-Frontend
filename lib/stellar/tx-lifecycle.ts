@@ -1,5 +1,4 @@
 import type { rpc, xdr } from "@stellar/stellar-sdk";
-import { scValToNative } from "@stellar/stellar-sdk";
 import type { AssembledTransaction } from "@stellar/stellar-sdk/contract";
 import {
   describeError,
@@ -99,7 +98,8 @@ export class TxLifecycle<T> {
   async run(
     tx: AssembledTransaction<T>,
     parse: (v: xdr.ScVal | undefined) => T,
-  ): Promise<{ value: T; txHash: string }> {
+    onHash?: (hash: string) => void,
+  ): Promise<{ value: T; txHash: string; ledger: number }> {
     // 1. Simulating
     this.setPhase({ name: "simulating" });
     try {
@@ -134,6 +134,7 @@ export class TxLifecycle<T> {
 
     const hash = signed.hash().toString("hex").toLowerCase();
     this.onHash?.(hash);
+    onHash?.(hash);
 
     // 3. Submitting
     this.setPhase({ name: "submitting", hash });
@@ -199,8 +200,8 @@ export class TxLifecycle<T> {
         let value: T;
         try {
           value = parse(getRes.returnValue);
-        } catch {
-          value = (getRes.returnValue ? scValToNative(getRes.returnValue) : null) as T;
+        } catch (error) {
+          throw new UserFacingError({ kind: "unknown", message: "The transaction confirmed, but its returned amount could not be decoded. Refresh your balance." }, error);
         }
         this.setPhase({
           name: "confirmed",
@@ -208,7 +209,7 @@ export class TxLifecycle<T> {
           ledger: getRes.ledger ?? getRes.latestLedger,
           returnValue: getRes.returnValue,
         });
-        return { value, txHash: hash };
+        return { value, txHash: hash, ledger: getRes.ledger };
       }
 
       if (getRes.status === "FAILED") {

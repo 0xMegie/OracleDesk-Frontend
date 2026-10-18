@@ -1,5 +1,10 @@
 "use client";
 
+import { TxReview, TxReviewPreferenceControl, shouldSkipTxReview } from "@/components/tx-review";
+import type { ReviewModel } from "@/lib/stellar/tx-decode";
+import { useSubmitQueueState } from "@/lib/stellar/submit-queue";
+
+
 import React, { useState, useRef, useEffect, useCallback, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useWallet } from "@/lib/contexts/WalletContext";
@@ -7,12 +12,15 @@ import { getTrace, ReasoningTrace } from "@/lib/api/traces";
 import { confirmCopyTrade, initiateCopyTrade } from "@/lib/api/trade";
 import { ApiError } from "@/lib/api/client";
 import { useMarket } from "@/lib/hooks/useMarkets";
-import { useBuy, useQuoteBuy, useUsdcBalance, useAccountReserve, usePrepareBuy } from "@/lib/hooks/useStellar";
+import { useBuy, useQuoteBuy, useUsdcBalance, useAccountReserve, usePrepareBuy, useOnChainMarket, fetchOnChainMarket, useUsdcTrustline, useEnableUsdc, useUsdcBalanceState, type PreparedWriteReview } from "@/lib/hooks/useStellar";
 import { explorerTx } from "@/lib/stellar/config";
 import { formatUsdc, formatXlm, minOut, shareOf } from "@/lib/stellar/units";
 import { TxPhase } from "@/lib/stellar/tx-lifecycle";
 
 /** Wait this long after the slider stops before asking for a new quote. */
+import { getLedgerNow, useLedgerNow } from "@/lib/stellar/ledger-clock";
+import { MIN_TX_TIMEOUT_S, SAFETY_MARGIN_S } from "@/lib/stellar/deadline";
+import { PendingValue } from "@/components/pending-value";
 const QUOTE_DEBOUNCE_MS = 400;
 
 function renderTxPhase(phase: TxPhase): string | null {
@@ -60,6 +68,13 @@ function CopyTradeContent() {
   const onChainMarket = useOnChainMarket(onChainMarketId);
 
   const balance = useUsdcBalance(address);
+  const balanceState = useUsdcBalanceState(address);
+  const ledger = useLedgerNow();
+  const trustline = useUsdcTrustline(address);
+  const enableUsdc = useEnableUsdc();
+  const trustlineMissing = trustline.data?.kind === "missing";
+  const trustlineReady = trustline.data?.kind === "native" || (trustline.data?.kind === "present" && trustline.data.authorized);
+  const marketCanTrade = onChainMarket.data?.market.status.tag === "Open" && ledger.now !== null && Number(onChainMarket.data.market.close_time) - ledger.now > SAFETY_MARGIN_S + MIN_TX_TIMEOUT_S;
   const reserve = useAccountReserve(address);
   const buy = useBuy();
   const submitQueue = useSubmitQueueState(address);
@@ -241,6 +256,7 @@ function CopyTradeContent() {
         collateralIn: amountRaw,
         slippageBps,
         prepared: prepareBuy.data,
+        review: reviewPreparedBuy,
       });
 
       if (result.txHash) await confirmCopyTrade(copyTradeId, result.txHash).catch(() => undefined);
@@ -362,7 +378,7 @@ function CopyTradeContent() {
               <div className="flex justify-between items-end flex-wrap gap-2">
                 <label className="font-label-caps text-label-caps text-on-surface-variant uppercase text-[10px]">Share of your USDC balance (%)</label>
                 <span className="font-data-mono text-data-mono text-primary font-bold text-xs sm:text-sm">
-                  {allocation.toFixed(2)}% ({amountRaw !== null ? `${formatUsdc(amountRaw, { maxDecimals: 2, minDecimals: 2, grouping: true })} USDC` : isConnected ? "loading balance…" : "connect a wallet"})
+                  {allocation.toFixed(2)}% ({amountRaw !== null ? `${formatUsdc(amountRaw, { maxDecimals: 2, minDecimals: 2, grouping: true })} USDC` : isConnected ? "loading balance…" : "connect a wallet"})<PendingValue state={balanceState.data} />
                 </span>
               </div>
               <div

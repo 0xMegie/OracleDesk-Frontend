@@ -3,8 +3,9 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useWallet } from "@/lib/contexts/WalletContext";
-import { useAccountReserve, useEnableUsdc, useRpcNetwork, useUsdcBalance, useUsdcTrustline } from "@/lib/hooks/useStellar";
+import { useAccountReserve, useEnableUsdc, useRpcNetwork, useUsdcBalance, useUsdcTrustline, useUsdcBalanceState } from "@/lib/hooks/useStellar";
 import { NETWORK_LABEL, NETWORK_PASSPHRASE, TESTNET_PASSPHRASE, explorerAccount } from "@/lib/stellar/config";
+import { PendingValue } from "@/components/pending-value";
 import { formatUsdc, formatXlm, shortAddress } from "@/lib/stellar/units";
 
 const WalletDropdown = () => {
@@ -13,6 +14,7 @@ const WalletDropdown = () => {
   const [copied, setCopied] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const balance = useUsdcBalance(address);
+  const balanceState = useUsdcBalanceState(address);
   const trustline = useUsdcTrustline(address);
   const enableUsdc = useEnableUsdc();
   const reserve = useAccountReserve(address);
@@ -120,7 +122,7 @@ const WalletDropdown = () => {
               </span>
               <div className="flex items-baseline gap-1">
                 <span className="text-xl font-bold text-on-surface font-data-mono">
-                  {balanceText}
+                  {balanceText}<PendingValue state={balanceState.data} />
                 </span>
                 <span className="text-xs font-bold text-on-surface-variant uppercase">
                   USDC
