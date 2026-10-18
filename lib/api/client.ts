@@ -138,6 +138,17 @@ async function request<T>(
   };
 }
 
+/**
+ * Enhanced error handling with JWT expiry detection.
+ * Returns true if the error indicates an expired or invalid token that needs re-auth.
+ */
+export function isAuthError(error: unknown): boolean {
+  if (error instanceof ApiError) {
+    return error.code === "TOKEN_EXPIRED" || error.code === "UNAUTHORIZED" || error.status === 401;
+  }
+  return false;
+}
+
 export const apiClient = {
   get<T>(path: string, params?: QueryParams) {
     return request<T>(path, { method: "GET" }, params);

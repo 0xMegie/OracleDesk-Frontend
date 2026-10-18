@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { useRouter } from "next/navigation";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { clearAuthSession, getStoredSessionWallet, signInWithWallet } from "@/lib/api/auth";
+import { createCrossTabSync, broadcastWalletDisconnect, type SyncMessage } from "@/lib/api/cross-tab-sync";
 import { NETWORK_PASSPHRASE } from "./config";
 import { describeError } from "./errors";
 import type { Signer } from "./clients";
@@ -67,6 +68,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       StellarWalletsKit.init({ modules: defaultModules(), network: Networks.TESTNET });
       setKit(() => StellarWalletsKit);
 
+      // Handle wallet kit state updates
       unsubscribe.push(
         StellarWalletsKit.on(KitEventType.STATE_UPDATED, ({ payload }) => {
           const next = payload.address ?? null;
@@ -84,6 +86,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
           setWalletNetworkPassphrase(null);
           clearAuthSession();
           setSessionWallet(null);
+          broadcastWalletDisconnect();
         }),
       );
 
@@ -97,6 +100,37 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       }
       if (!cancelled) setSessionWallet(getStoredSessionWallet());
     })();
+
+    // Setup cross-tab sync listener
+    const crossTabSync = createCrossTabSync((msg: SyncMessage) => {
+      if (cancelled) return;
+
+      switch (msg.type) {
+        case "wallet_disconnected":
+          setAddress(null);
+          setWalletNetworkPassphrase(null);
+          clearAuthSession();
+          setSessionWallet(null);
+          break;
+
+        case "wallet_changed":
+          if (msg.address !== getStoredSessionWallet()) {
+            setAddress(msg.address || null);
+            // Session will be re-validated on next use
+          }
+          break;
+
+        case "auth_session_changed":
+          // Another tab changed the session; update our stored wallet reference
+          const newWallet = msg.address || getStoredSessionWallet();
+          if (newWallet && newWallet !== getStoredSessionWallet()) {
+            setSessionWallet(newWallet);
+          }
+          break;
+      }
+    });
+    unsubscribe.push(() => crossTabSync.unsubscribe());
+
     return () => {
       cancelled = true;
       unsubscribe.forEach((fn) => fn());
