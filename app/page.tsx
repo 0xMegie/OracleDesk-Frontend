@@ -1,82 +1,57 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { motion } from "framer-motion";
-import { io } from "socket.io-client";
 import { useWallet } from "@/lib/contexts/WalletContext";
 import { useMarkets } from "@/lib/hooks/useMarkets";
-import { API_URL } from "@/lib/api/client";
 import { formatUsdc } from "@/lib/stellar/units";
+import { useBurstFeed } from "@/lib/realtime/useBurst";
+import { type RealtimeEvent, eventKey } from "@/lib/realtime/types";
+import { formatFeedTime } from "@/lib/realtime/format";
+import { RealtimeProfiler } from "@/components/realtime-profiler";
 import { DemoBadge } from "@/components/ui/demo-badge";
 
-interface FeedItem {
-  time: string;
-  agent: string;
-  action: string;
-  details: string;
-  chain: string;
-  color: string;
-}
+const AgentActivityRow = React.memo(function AgentActivityRow({ event }: { event: RealtimeEvent }) {
+  const data = event.payload;
+  const time = formatFeedTime(data.closedAt ?? event.receivedAt);
+  const item = event.type === "TRADE_EXECUTED" ? {
+    key: eventKey(event), time, receipt: !data.closedAt, agent: "Trader", action: event.payload.isBuy ? "BUY" : "SELL",
+    details: `${event.payload.direction} ${formatUsdc(BigInt(event.payload.collateralRaw), { maxDecimals: 2, grouping: true })} USDC on #${data.onChainMarketId} · YES ${(event.payload.priceYesBps / 100).toFixed(1)}%`,
+    chain: "Stellar", color: "text-secondary",
+  } : {
+    key: eventKey(event), time, receipt: !data.closedAt, agent: "Reasoner", action: "PUBLISH_TRACE",
+    details: `Trace #${event.payload.onChainTraceId} (${event.payload.action})`, chain: "Stellar", color: "text-primary-fixed",
+  };
+
+  return <div className="flex gap-4 border-l border-white/10 pl-4 py-1 hover:bg-white/5 transition-colors group">
+          <span className="text-white/20 whitespace-nowrap">[{item.time}]{item.receipt && " received"}</span>
+          <span className="text-primary font-bold whitespace-nowrap">{item.agent}</span>
+          <span className={`font-black ${item.color} whitespace-nowrap`}>{item.action}</span>
+          <span className="text-white/70 truncate flex-grow">{item.details}</span>
+          <span className={`text-[9px] px-1.5 py-0.5 rounded border border-primary/50 text-primary font-bold`}>{item.chain}</span>
+        </div>;
+});
+
 
 const AgentActivityFeed = () => {
-  const [feed, setFeed] = useState<FeedItem[]>([]);
-
-  useEffect(() => {
-    const socket = io(API_URL.replace(/\/api\/v1\/?$/, ""));
-
-    // Payloads are documented in docs/api.md (Realtime).
-    socket.on("TRADE_EXECUTED", (data: { direction: string; isBuy: boolean; collateralRaw: string; priceYesBps: number; onChainMarketId: string }) => {
-      const time = new Date().toLocaleTimeString('en-GB', { hour12: false });
-      setFeed(prev => [{
-        time,
-        agent: "Trader",
-        action: data.isBuy ? "BUY" : "SELL",
-        details: `${data.direction} ${formatUsdc(BigInt(data.collateralRaw), { maxDecimals: 2, grouping: true })} USDC on #${data.onChainMarketId} · YES ${(data.priceYesBps / 100).toFixed(1)}%`,
-        chain: "Stellar",
-        color: "text-secondary"
-      }, ...prev.slice(0, 5)]);
-    });
-
-    socket.on("REASONING_PUBLISHED", (data: { onChainTraceId: string; action: string }) => {
-      const time = new Date().toLocaleTimeString('en-GB', { hour12: false });
-      setFeed(prev => [{
-        time,
-        agent: "Reasoner",
-        action: "PUBLISH_TRACE",
-        details: `Trace #${data.onChainTraceId} (${data.action})`,
-        chain: "Stellar",
-        color: "text-primary-fixed"
-      }, ...prev.slice(0, 5)]);
-    });
-
-    return () => {
-      socket.disconnect();
-    };
-  }, []);
+  const { rows, burst } = useBurstFeed({ capacity: 6 });
 
   return (
     <div className="bg-on-background rounded-xl overflow-hidden shadow-2xl border border-outline border-opacity-30">
       <div className="px-6 py-4 border-b border-white/10 flex justify-between items-center bg-white/5">
         <div className="flex items-center gap-2">
-          <span className="material-symbols-outlined text-secondary animate-pulse">monitoring</span>
+          <span className="material-symbols-outlined text-secondary animate-pulse motion-reduce:animate-none">monitoring</span>
           <h3 className="font-headline-sm text-headline-sm text-white uppercase tracking-widest text-xs">Live Agent Activity</h3>
         </div>
         <span className="text-white/30 text-[9px] font-data-mono uppercase">Stellar Testnet</span>
       </div>
       <div className="p-6 h-[320px] overflow-y-auto font-data-mono text-[11px] space-y-3 custom-scrollbar">
-        {feed.length === 0 && (
+        {rows.length === 0 && (
           <p className="text-white/40">Waiting for agent activity on-chain…</p>
         )}
-        {feed.map((item, i) => (
-          <div key={i} className="flex gap-4 border-l border-white/10 pl-4 py-1 hover:bg-white/5 transition-colors group">
-            <span className="text-white/20 whitespace-nowrap">[{item.time}]</span>
-            <span className="text-primary font-bold whitespace-nowrap">{item.agent}</span>
-            <span className={`font-black ${item.color} whitespace-nowrap`}>{item.action}</span>
-            <span className="text-white/70 truncate flex-grow">{item.details}</span>
-            <span className={`text-[9px] px-1.5 py-0.5 rounded border border-primary/50 text-primary font-bold`}>{item.chain}</span>
-          </div>
-        ))}
+        {burst && <p className="text-white/70">{burst.count} events in the last second{burst.overflow ? ` · ${burst.overflow} more events while this tab was hidden` : ""}.</p>}
+        {rows.map(event => <AgentActivityRow key={eventKey(event)} event={event} />)}
       </div>
     </div>
   );
@@ -132,9 +107,9 @@ const Ticker = () => {
   return (
     <div className="bg-on-background text-primary-fixed-dim py-2 border-b border-outline overflow-hidden">
       <div className="ticker-wrap w-full">
-        <div className="ticker-content animate-ticker font-data-mono text-data-mono uppercase flex gap-8 whitespace-nowrap">
+        <div className="ticker-content realtime-ticker animate-ticker motion-reduce:animate-none font-data-mono text-data-mono uppercase flex gap-8 whitespace-nowrap">
           {[...tickerItems, ...tickerItems, ...tickerItems].map((item, i) => (
-            <span key={i}>{item} •</span>
+            <span key={`${i}:${item}`} className={i >= tickerItems.length ? "motion-reduce:hidden" : ""}>{item} •</span>
           ))}
         </div>
       </div>
@@ -322,7 +297,7 @@ const MarketsGrid = () => {
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
         {isLoading ? (
           [...Array(3)].map((_, i) => (
-            <div key={i} className="h-64 bg-surface-container-low animate-pulse rounded-lg border border-outline-variant"></div>
+            <div key={i} className="h-64 bg-surface-container-low animate-pulse motion-reduce:animate-none rounded-lg border border-outline-variant"></div>
           ))
         ) : markets.length > 0 ? (
           markets.map((m) => {
@@ -386,7 +361,7 @@ const ReasoningSection = () => {
               <p>&gt; CORRELATION DETECTED: 0.89 WITH 2019 PIVOT</p>
               <p>&gt; CALCULATING CONFIDENCE INTERVALS...</p>
               <p>&gt; TRACE ANCHORED ON ETHEREUM MAINNET</p>
-              <p className="text-secondary animate-pulse">&gt; VERDICT: DOVISH SHIFT CONFIRMED</p>
+              <p className="text-secondary animate-pulse motion-reduce:animate-none">&gt; VERDICT: DOVISH SHIFT CONFIRMED</p>
             </div>
           </div>
         </div>
@@ -529,7 +504,7 @@ export default function Home() {
         <section className="bg-white py-12 border-b border-outline-variant">
           <div className="max-w-container-max-width mx-auto px-gutter grid lg:grid-cols-3 gap-8">
             <div className="lg:col-span-2">
-              <AgentActivityFeed />
+              <RealtimeProfiler id="AgentActivityFeed"><AgentActivityFeed /></RealtimeProfiler>
             </div>
             <div>
               <ProtocolActivity />

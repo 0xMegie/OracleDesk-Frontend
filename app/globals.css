@@ -196,3 +196,6 @@
     display: none;
   }
 }
+@media (prefers-reduced-motion: reduce) {
+  .realtime-ticker { transform: none; white-space: normal; flex-wrap: wrap; }
+}
