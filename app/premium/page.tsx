@@ -162,12 +162,10 @@ export default function PremiumPage() {
     ? fees.totalFee - reserve.data.spendable
     : null;
 
-  const openCheckout = (tier: Tier) => {
+  const openCheckout = async (tier: Tier) => {
     if (!tier.priceRaw) return;
-    if (!isConnected) {
-      void openModal();
-      return;
-    }
+    // Connecting stays on this page; keep the chosen tier if the wallet connects.
+    if (!isConnected && !(await openModal())) return;
     setStatusMessage(null);
     setSelectedTier(tier);
   };
@@ -186,7 +184,7 @@ export default function PremiumPage() {
 
     setIsSubmitting(true);
     try {
-      setStatusMessage("Signing in to OracleDesk…");
+      setStatusMessage("One more signature: this logs you in to OracleDesk and doesn't move funds.");
       if (!(await ensureSession())) {
         setStatusMessage("You need to sign in with your wallet before paying.");
         return;

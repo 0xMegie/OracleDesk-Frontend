@@ -1,16 +1,26 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { clearAuthSession, getStoredSessionWallet, signInWithWallet } from "@/lib/api/auth";
-import { createCrossTabSync, broadcastWalletDisconnect, type SyncMessage } from "@/lib/api/cross-tab-sync";
+import { broadcastWalletDisconnect, createCrossTabSync } from "@/lib/api/cross-tab-sync";
+import { safeReturnTo } from "@/lib/navigation";
 import { NETWORK_PASSPHRASE } from "./config";
-import { describeError } from "./errors";
+import { describeError, UserFacingError } from "./errors";
 import type { Signer } from "./clients";
+import { loadStellarWalletsKit, type WalletKitAdapter } from "./wallet-kit-adapter";
+import { WalletInterpreter } from "./wallet-interpreter";
+import { viewOf } from "./wallet-machine";
 import { TransactionTrackerProvider } from "./tx-tracker";
 
-type Kit = typeof import("@creit.tech/stellar-wallets-kit").StellarWalletsKit;
+export interface OpenModalOptions {
+  /**
+   * Where to go after a successful connect. Only a same-origin path is used
+   * (see safeReturnTo). Without it the user stays on the page they are on.
+   */
+  returnTo?: string;
+}
 
 export interface WalletContextValue {
   address: string | null;
@@ -25,9 +35,15 @@ export interface WalletContextValue {
   isAuthenticated: boolean;
   /** Last connect/sign-in error, in plain language. */
   error: string | null;
-  openModal: () => Promise<void>;
+  /** Resolves true if a wallet is connected when the attempt ends. Stays on the current page. */
+  openModal: (opts?: OpenModalOptions) => Promise<boolean>;
   /** Runs the backend challenge login if there's no session for this address. */
   ensureSession: () => Promise<boolean>;
+  /**
+   * Signs in to the backend right before `fn`, which calls a protected endpoint.
+   * Throws a readable error if the user declines, so `fn` never runs without a session.
+   */
+  withSession: <T>(fn: () => Promise<T>, why: string) => Promise<T>;
   disconnect: () => Promise<void>;
 }
 
@@ -39,8 +55,19 @@ export function useWallet(): WalletContextValue {
   return ctx;
 }
 
-export function WalletProvider({ children }: { children: ReactNode }) {
+export interface WalletProviderProps {
+  children: ReactNode;
+  /** Replaces the real kit in tests. Defaults to loading Stellar Wallets Kit in the browser. */
+  kitLoader?: () => Promise<WalletKitAdapter>;
+}
+
+export function WalletProvider({ children, kitLoader = loadStellarWalletsKit }: WalletProviderProps) {
   const router = useRouter();
+  const routerRef = useRef(router);
+  useEffect(() => {
+    routerRef.current = router;
+  }, [router]);
+
   const [queryClient] = useState(
     () =>
       new QueryClient({
@@ -48,194 +75,76 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       }),
   );
 
-  const [kit, setKit] = useState<Kit | null>(null);
-  const [address, setAddress] = useState<string | null>(null);
-  const [walletNetworkPassphrase, setWalletNetworkPassphrase] = useState<string | null>(null);
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [sessionWallet, setSessionWallet] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // All wallet logic lives in the state machine; this component only renders it.
+  const [interpreter] = useState(
+    () =>
+      new WalletInterpreter({
+        loadKit: kitLoader,
+        storedSessionWallet: getStoredSessionWallet,
+        clearBackendSession: clearAuthSession,
+        signIn: async (address, sign) => {
+          const session = await signInWithWallet(address, async (xdr, networkPassphrase) => {
+            const { signedTxXdr } = await sign(xdr, { networkPassphrase, address });
+            return signedTxXdr;
+          });
+          return session.walletAddress;
+        },
+        purgeStellarQueries: () => queryClient.removeQueries({ queryKey: ["stellar"] }),
+        navigate: (to) => routerRef.current.replace(to),
+        describe: (err) => describeError(err),
+        broadcastDisconnect: broadcastWalletDisconnect,
+      }),
+  );
 
-  // The kit reads localStorage when its module is evaluated, which breaks
-  // server rendering, so it's only imported in the browser.
+  // Starts the kit, restores a session the kit persisted (never redirects or
+  // prompts), and tears the kit subscriptions down on unmount.
+  useEffect(() => interpreter.start(), [interpreter]);
+
+  // Changes made in another tab (disconnect, account switch, login) reach this tab.
   useEffect(() => {
-    let cancelled = false;
-    const unsubscribe: Array<() => void> = [];
-    (async () => {
-      const [{ StellarWalletsKit, KitEventType, Networks }, { defaultModules }] = await Promise.all([
-        import("@creit.tech/stellar-wallets-kit"),
-        import("@creit.tech/stellar-wallets-kit/modules/utils"),
-      ]);
-      if (cancelled) return;
-      StellarWalletsKit.init({ modules: defaultModules(), network: Networks.TESTNET });
-      setKit(() => StellarWalletsKit);
+    const sync = createCrossTabSync((msg) => interpreter.applyCrossTab(msg));
+    return () => sync.unsubscribe();
+  }, [interpreter]);
 
-      // Handle wallet kit state updates
-      unsubscribe.push(
-        StellarWalletsKit.on(KitEventType.STATE_UPDATED, ({ payload }) => {
-          const next = payload.address ?? null;
-          // A backend session for a different wallet is never reused.
-          const stored = getStoredSessionWallet();
-          if (stored && next && stored !== next) {
-            clearAuthSession();
-            setSessionWallet(null);
-          }
-          setAddress(next);
-          setWalletNetworkPassphrase(payload.networkPassphrase || null);
-        }),
-        StellarWalletsKit.on(KitEventType.DISCONNECT, () => {
-          setAddress(null);
-          setWalletNetworkPassphrase(null);
-          clearAuthSession();
-          setSessionWallet(null);
-          broadcastWalletDisconnect();
-        }),
-      );
-
-      // Restore a session the kit persisted. This is not a fresh connect,
-      // so it never redirects and never prompts the wallet.
-      try {
-        const { address: restored } = await StellarWalletsKit.getAddress();
-        if (!cancelled && restored) setAddress(restored);
-      } catch {
-        // Nothing persisted.
-      }
-      if (!cancelled) setSessionWallet(getStoredSessionWallet());
-    })();
-
-    // Setup cross-tab sync listener
-    const crossTabSync = createCrossTabSync((msg: SyncMessage) => {
-      if (cancelled) return;
-
-      switch (msg.type) {
-        case "wallet_disconnected":
-          setAddress(null);
-          setWalletNetworkPassphrase(null);
-          clearAuthSession();
-          setSessionWallet(null);
-          break;
-
-        case "wallet_changed":
-          if (msg.address !== getStoredSessionWallet()) {
-            setAddress(msg.address || null);
-            // Session will be re-validated on next use
-          }
-          break;
-
-        case "auth_session_changed":
-          // Another tab changed the session; update our stored wallet reference
-          const newWallet = msg.address || getStoredSessionWallet();
-          if (newWallet && newWallet !== getStoredSessionWallet()) {
-            setSessionWallet(newWallet);
-          }
-          break;
-      }
-    });
-    unsubscribe.push(() => crossTabSync.unsubscribe());
-
-    return () => {
-      cancelled = true;
-      unsubscribe.forEach((fn) => fn());
-    };
-  }, []);
+  const state = useSyncExternalStore(interpreter.subscribe, interpreter.getState, interpreter.getState);
+  const view = useMemo(() => viewOf(state), [state]);
+  const { address } = view;
 
   const signer = useMemo<Signer | null>(() => {
-    if (!address || !kit) return null;
+    if (!address) return null;
     return {
       publicKey: address,
       signTransaction: (xdr, opts) =>
-        kit.signTransaction(xdr, { networkPassphrase: opts?.networkPassphrase ?? NETWORK_PASSPHRASE, address }),
+        interpreter.signTransaction(xdr, { networkPassphrase: opts?.networkPassphrase ?? NETWORK_PASSPHRASE, address }),
     };
-  }, [address, kit]);
+  }, [address, interpreter]);
 
-  const signIn = useCallback(async (forAddress: string) => {
-    if (!kit) throw new Error("Wallet is still loading");
-    const session = await signInWithWallet(forAddress, async (xdr, networkPassphrase) => {
-      const { signedTxXdr } = await kit.signTransaction(xdr, { networkPassphrase, address: forAddress });
-      return signedTxXdr;
-    });
-    setSessionWallet(session.walletAddress);
-  }, [kit]);
-
-  const ensureSession = useCallback(async () => {
-    if (!address) return false;
-    if (sessionWallet === address) return true;
-    try {
-      setError(null);
-      await signIn(address);
-      return true;
-    } catch (err) {
-      setError(describeError(err).message);
-      return false;
-    }
-  }, [address, sessionWallet, signIn]);
-
-  const openModal = useCallback(async () => {
-    if (!kit) return;
-    setIsConnecting(true);
-    setError(null);
-    try {
-      const { address: connected } = await kit.authModal();
-      const stored = getStoredSessionWallet();
-      if (stored && stored !== connected) {
-        clearAuthSession();
-        setSessionWallet(null);
-      }
-      setAddress(connected);
-      try {
-        const { networkPassphrase } = await kit.getNetwork();
-        setWalletNetworkPassphrase(networkPassphrase);
-      } catch {
-        // Some wallets can't report their network; leave it unknown.
-      }
-      if (getStoredSessionWallet() !== connected) {
-        try {
-          await signIn(connected);
-        } catch (err) {
-          // Connected, but not signed in to the backend. Pages that need a
-          // session call ensureSession() again.
-          setError(describeError(err).message);
+  const value = useMemo<WalletContextValue>(
+    () => ({
+      address,
+      isConnected: view.isConnected,
+      isConnecting: view.isConnecting,
+      walletNetworkPassphrase: view.walletNetworkPassphrase,
+      isWrongNetwork: Boolean(view.walletNetworkPassphrase) && view.walletNetworkPassphrase !== NETWORK_PASSPHRASE,
+      signer,
+      isAuthenticated: view.isAuthenticated,
+      error: view.error,
+      openModal: (opts) => interpreter.openModal(safeReturnTo(opts?.returnTo)),
+      ensureSession: () => interpreter.ensureSession(),
+      withSession: async (fn, why) => {
+        if (!(await interpreter.ensureSession())) {
+          const connected = viewOf(interpreter.getState()).isConnected;
+          throw new UserFacingError({
+            kind: "disconnected",
+            message: connected ? `Sign in with your wallet to ${why}.` : `Connect your wallet to ${why}.`,
+          });
         }
-      } else {
-        setSessionWallet(connected);
-      }
-      // Only a connect the user just completed in this tab redirects.
-      router.push("/markets");
-    } catch (err) {
-      const described = describeError(err);
-      // Closing the picker is not an error worth showing.
-      if (described.kind !== "rejected" && !/closed/i.test(String((err as { message?: string })?.message))) {
-        setError(described.message);
-      }
-    } finally {
-      setIsConnecting(false);
-    }
-  }, [kit, router, signIn]);
-
-  const disconnect = useCallback(async () => {
-    try {
-      await kit?.disconnect();
-    } finally {
-      setAddress(null);
-      setWalletNetworkPassphrase(null);
-      clearAuthSession();
-      setSessionWallet(null);
-      queryClient.removeQueries({ queryKey: ["stellar"] });
-    }
-  }, [kit, queryClient]);
-
-  const value: WalletContextValue = {
-    address,
-    isConnected: Boolean(address),
-    isConnecting,
-    walletNetworkPassphrase,
-    isWrongNetwork: Boolean(walletNetworkPassphrase) && walletNetworkPassphrase !== NETWORK_PASSPHRASE,
-    signer,
-    isAuthenticated: Boolean(address) && sessionWallet === address,
-    error,
-    openModal,
-    ensureSession,
-    disconnect,
-  };
+        return fn();
+      },
+      disconnect: async () => interpreter.disconnect(),
+    }),
+    [address, view, signer, interpreter],
+  );
 
   return (
     <QueryClientProvider client={queryClient}>

@@ -50,6 +50,7 @@ export interface DescribedError {
     | "rejected"
     | "insufficient-balance"
     | "insufficient-xlm"
+    | "account-not-found"
     | "no-trustline"
     | "contract"
     | "wrong-network"
@@ -102,6 +103,14 @@ export function describeError(err: unknown, contract: ContractName = "marketCore
   }
   if (/user (rejected|declined|denied)|rejected by (the )?user|request (was )?rejected|declined|cancell?ed by user|user closed/i.test(text)) {
     return { kind: "rejected", message: "You cancelled the request in your wallet." };
+  }
+  // The kit throws this after a reload when the phone's WalletConnect session has ended.
+  if (/No WalletConnect session found/i.test(text)) {
+    return { kind: "disconnected", message: "Your mobile wallet session ended. Connect your mobile wallet again." };
+  }
+  // The SDK throws this when the source account has no ledger entry (never funded).
+  if (/Account not found|op_no_source_account|tx_no_source_account|txNoAccount/i.test(text)) {
+    return { kind: "account-not-found", message: "Your Stellar account isn't activated yet. Fund it with XLM first." };
   }
   if (/trustline entry is missing|TrustlineMissing|trustline.*(missing|not found)|op_no_trust/i.test(text)) {
     return {

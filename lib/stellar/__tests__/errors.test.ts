@@ -52,6 +52,18 @@ describe("describeError", () => {
     expect(describeError("op_underfunded").kind).toBe("insufficient-balance");
   });
 
+  it("maps a missing WalletConnect session to a reconnect message", () => {
+    const described = describeError(new Error("No WalletConnect session found or it expired for the selected address."));
+    expect(described).toMatchObject({ kind: "disconnected" });
+    expect(described.message).toMatch(/connect your mobile wallet again/i);
+  });
+
+  it("maps an unfunded source account to account-not-found, before USDC rules", () => {
+    expect(describeError(new Error("Account not found: GABC123")).kind).toBe("account-not-found");
+    expect(describeError("op_no_source_account").kind).toBe("account-not-found");
+    expect(describeError("balance is not sufficient to spend").kind).toBe("insufficient-balance");
+  });
+
   it("falls back to a readable message", () => {
     expect(describeError(new TypeError("Failed to fetch")).kind).toBe("network");
     expect(describeError(42).message).toMatch(/something went wrong/i);
